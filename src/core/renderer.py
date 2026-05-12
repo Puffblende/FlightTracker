@@ -44,15 +44,18 @@ PLANE_GLYPH = [
 ]
 
 
-def _draw_plane(buf, cx: int, cy: int, color: tuple, W: int, H: int) -> None:
-    """Draw the plane glyph centred horizontally on cx, with the wings at cy."""
+def _draw_plane(buf, cx: int, cy: int, color: tuple, W: int, H: int,
+               x_min: int = 0, x_max: int = -1) -> None:
+    """Draw the plane glyph centred on cx/cy, clipped to [x_min, x_max)."""
+    if x_max < 0:
+        x_max = W
     for gy, row in enumerate(PLANE_GLYPH):
         for gx, ch in enumerate(row):
             if ch != "X":
                 continue
             x = cx + gx - 3
-            y = cy + gy - 3   # row 3 (wings) sits on the bar row
-            if 0 <= x < W and 0 <= y < H:
+            y = cy + gy - 3
+            if x_min <= x < x_max and 0 <= y < H:
                 buf[y][x] = color
 
 
@@ -69,49 +72,52 @@ def _draw_progress(buf, block: LayoutBlock, flight: Flight, W: int, H: int) -> N
     prog = flight_progress(flight)
     pos = int(round((width - 1) * max(0.0, min(1.0, prog)))) if prog is not None else None
 
+    x1 = x0 + width   # exclusive right edge of the bar block
+
     # ── Draw the bar ──
     if block.show_remaining:
-        # Full route with completed (solid) + remaining (dim) portions
-        dim = tuple(c // 4 for c in color)
+        # Solid completed portion + dotted remaining portion (every 2nd pixel, 50 % brightness)
+        dim = tuple(c // 2 for c in color)
         for i in range(width):
             bx = x0 + i
             if not (0 <= bx < W and 0 <= bar_y < H):
                 continue
             if pos is None:
-                buf[bar_y][bx] = dim
+                if i % 2 == 0:
+                    buf[bar_y][bx] = dim         # dotted when no progress data
             elif i <= pos:
-                buf[bar_y][bx] = color
-            else:
-                buf[bar_y][bx] = dim
+                buf[bar_y][bx] = color           # solid = completed
+            elif i % 2 == 0:
+                buf[bar_y][bx] = dim             # dotted = remaining
     else:
-        # Only the completed portion is drawn — bar ends at the aircraft.
-        # If progress is unknown, draw nothing.
+        # Only the completed portion; nothing drawn if progress unknown.
         if pos is not None:
             for i in range(pos + 1):
                 bx = x0 + i
                 if 0 <= bx < W and 0 <= bar_y < H:
                     buf[bar_y][bx] = color
 
-    # ── Endpoint dots (origin + destination), independent of show_remaining ──
+    # ── Endpoint dots (origin + destination) ──────────────────────────────────
     if block.show_endpoints:
-        for end_x in (x0, x0 + width - 1):
+        for end_x in (x0, x1 - 1):
             for dy_ in (-1, 0):
                 for dx_ in (-1, 0, 1):
                     px, py = end_x + dx_, bar_y + dy_
-                    if 0 <= px < W and 0 <= py < H:
+                    if x0 <= px < x1 and 0 <= py < H:
                         buf[py][px] = color
 
-    # ── Marker / plane ──
+    # ── Marker / plane — clipped to bar width ─────────────────────────────────
     if pos is not None:
         marker_x = x0 + pos
         if block.show_plane:
-            _draw_plane(buf, marker_x, bar_y, plane_color, W, H)
+            _draw_plane(buf, marker_x, bar_y, plane_color, W, H,
+                        x_min=x0, x_max=x1)
         else:
             for dx_ in (-1, 0, 1):
                 bx = marker_x + dx_
-                if 0 <= bx < W and 0 <= bar_y < H:
+                if x0 <= bx < x1 and 0 <= bar_y < H:
                     buf[bar_y][bx] = plane_color
-            if 0 <= bar_y - 1 < H and 0 <= marker_x < W:
+            if 0 <= bar_y - 1 < H and x0 <= marker_x < x1:
                 buf[bar_y - 1][marker_x] = plane_color
 
     # ── Remaining distance text (below the bar block) ──

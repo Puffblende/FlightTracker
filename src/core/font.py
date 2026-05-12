@@ -1,5 +1,6 @@
 """5×7 bitmap pixel font for LED matrix rendering.
 Each character: 7 rows × 5 bits (MSB = leftmost pixel)."""
+from __future__ import annotations
 
 FONT_5X7: dict[str, list[int]] = {
     ' ': [0x00,0x00,0x00,0x00,0x00,0x00,0x00],

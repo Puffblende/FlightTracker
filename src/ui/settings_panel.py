@@ -275,3 +275,60 @@ class SettingsPanel(QWidget):
     @property
     def credentials(self):
         return (self.txt_user.text(), self.txt_pass.text())
+
+    # ── Preset state helpers ──────────────────────────────────────────────────
+
+    def get_state(self) -> dict:
+        """Return all UI-controlled settings as a dict (for preset serialisation)."""
+        return {
+            "display_key":    self.combo_display.currentData(),
+            "custom_grid":    list(self._custom_grid),
+            "custom_win":     list(self._custom_win),
+            "radius":         self.slider_radius.value(),
+            "fetch_interval": self.spin_refresh.value(),
+            "cycle_interval": self.spin_cycle.value(),
+            "opensky_user":   self.txt_user.text(),
+            "opensky_pass":   self.txt_pass.text(),
+        }
+
+    def restore_state(self, data: dict) -> None:
+        """Restore settings from a preset dict without emitting any signals."""
+        key = data.get("display_key", DEFAULT_SIZE_KEY)
+        cg  = data.get("custom_grid", [80, 40])
+        cw  = data.get("custom_win",  [0,  0])
+        self._custom_grid = tuple(cg)
+        self._custom_win  = tuple(cw)
+
+        self.combo_display.blockSignals(True)
+        matched = False
+        for i in range(self.combo_display.count()):
+            if self.combo_display.itemData(i) == key:
+                self.combo_display.setCurrentIndex(i)
+                self._last_display_idx = i
+                matched = True
+                break
+        if not matched:
+            # Fall back to the custom-size entry
+            for i in range(self.combo_display.count()):
+                if self.combo_display.itemData(i) == CUSTOM_ITEM[0]:
+                    self.combo_display.setCurrentIndex(i)
+                    self._last_display_idx = i
+                    break
+        self.combo_display.blockSignals(False)
+
+        radius = int(data.get("radius", 50))
+        self.slider_radius.blockSignals(True)
+        self.slider_radius.setValue(radius)
+        self.lbl_radius.setText(f"{radius} km")
+        self.slider_radius.blockSignals(False)
+
+        self.spin_refresh.blockSignals(True)
+        self.spin_refresh.setValue(int(data.get("fetch_interval", 15)))
+        self.spin_refresh.blockSignals(False)
+
+        self.spin_cycle.blockSignals(True)
+        self.spin_cycle.setValue(int(data.get("cycle_interval", 5)))
+        self.spin_cycle.blockSignals(False)
+
+        self.txt_user.setText(data.get("opensky_user", ""))
+        self.txt_pass.setText(data.get("opensky_pass", ""))

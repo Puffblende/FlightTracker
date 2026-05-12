@@ -98,13 +98,13 @@ def _render_progress_to_pixmap(block: LayoutBlock, grid_scale: int) -> QPixmap:
     h = max(1, block.height)
     img = QImage(w * grid_scale, h * grid_scale, QImage.Format.Format_ARGB32)
     img.fill(0)
-    color = QColor(*block.color)
+    color    = QColor(*block.color)
     plane_qc = QColor(*(block.plane_color if block.plane_color is not None else block.color))
-    dim = QColor(block.color[0] // 4, block.color[1] // 4, block.color[2] // 4)
+    dim      = QColor(block.color[0] // 2, block.color[1] // 2, block.color[2] // 2)
 
     bar_block_h = 7 if block.show_plane else 3
     bar_y = bar_block_h // 2
-    pos = (w - 1) // 2  # always sample at 50% for preview
+    pos   = (w - 1) // 2  # 50 % for preview
 
     def put(x, y, qc):
         if not (0 <= x < w and 0 <= y < h):
@@ -113,10 +113,13 @@ def _render_progress_to_pixmap(block: LayoutBlock, grid_scale: int) -> QPixmap:
             for dx in range(grid_scale):
                 img.setPixelColor(x * grid_scale + dx, y * grid_scale + dy, qc)
 
-    # Bar
+    # Bar — dotted remaining (every 2nd pixel) matches renderer
     if block.show_remaining:
         for i in range(w):
-            put(i, bar_y, color if i <= pos else dim)
+            if i <= pos:
+                put(i, bar_y, color)
+            elif i % 2 == 0:
+                put(i, bar_y, dim)
     else:
         for i in range(pos + 1):
             put(i, bar_y, color)
@@ -128,7 +131,7 @@ def _render_progress_to_pixmap(block: LayoutBlock, grid_scale: int) -> QPixmap:
                 for dx_ in (-1, 0, 1):
                     put(ex + dx_, bar_y + dy_, color)
 
-    # Marker / plane
+    # Marker / plane — put() already clips to [0, w) so no overflow
     if block.show_plane:
         for gy, row in enumerate(_PLANE_GLYPH):
             for gx, ch in enumerate(row):
@@ -750,6 +753,24 @@ class LayoutEditorWidget(QWidget):
         self._emit()
 
     # ── reset / shared ────────────────────────────────────────────────────────
+
+    def set_layout(self, blocks: list[LayoutBlock]) -> None:
+        """Restore an external layout without emitting layout_changed."""
+        from src.core.models import BLOCK_TYPES
+        self._blocks = list(blocks)
+        # Ensure every known block type is present (add disabled stubs for missing ones)
+        existing = {b.key for b in self._blocks}
+        for key, _label, _color in BLOCK_TYPES:
+            if key not in existing:
+                self._blocks.append(LayoutBlock(key, 0, 0, False))
+        for key, row in self._rows.items():
+            block = next((b for b in self._blocks if b.key == key), None)
+            if block:
+                row.set_enabled(block.enabled)
+                row.refresh_color(block.color)
+        self._selected_key = None
+        self._custom.show_block(None)
+        self._populate()
 
     def _reset(self):
         self._blocks = default_layout()
