@@ -43,7 +43,7 @@ def _dark_palette(app: QApplication) -> None:
 
 def main():
     # PyQt6 enables high-DPI scaling by default; keep consistent rounding
-    QApplication.setHighDpiScalePolicy(
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
 

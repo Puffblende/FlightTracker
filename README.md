@@ -50,16 +50,23 @@ If not, download Python from [python.org](https://www.python.org/downloads/).
 
 **2. Install dependencies**
 
+Double-click **`install.command`** in the FlightTracker folder.
+
+Or open Terminal in the folder and run:
 ```bash
-cd /path/to/FlightTracker
 pip3 install -r requirements.txt
 ```
 
 **3. Run**
 
+Double-click **`run.command`**, or open Terminal and run:
 ```bash
 python3 main.py
 ```
+
+> **First-time double-click on macOS:** Gatekeeper may block unidentified scripts.
+> If `install.command` or `run.command` won't open, right-click the file → "Open"
+> → confirm. After that, double-clicking works normally.
 
 ---
 
@@ -211,6 +218,8 @@ FlightTracker/
 ├── requirements.txt         Python dependencies
 ├── install.bat              Windows: one-click install
 ├── run.bat                  Windows: one-click launch
+├── install.command          macOS: one-click install
+├── run.command              macOS: one-click launch
 └── src/
     ├── api/
     │   ├── opensky.py       OpenSky Network client

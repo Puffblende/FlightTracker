@@ -2,9 +2,65 @@
 from __future__ import annotations
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QLineEdit,
-    QPushButton, QGroupBox, QSpinBox, QFormLayout, QCheckBox,
+    QPushButton, QGroupBox, QSpinBox, QFormLayout, QCheckBox, QComboBox,
+    QDialog, QDialogButtonBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
+
+from src.core.displays import DISPLAY_SIZES, DEFAULT_SIZE_KEY, CUSTOM_KEY
+
+
+CUSTOM_ITEM = ("__custom__", "Custom size…")
+
+
+class CustomSizeDialog(QDialog):
+    """Ask for LED grid dimensions and an optional target window size."""
+
+    def __init__(self, parent=None, grid_w=80, grid_h=40, win_w=0, win_h=0):
+        super().__init__(parent)
+        self.setWindowTitle("Custom Display Size")
+        self.setModal(True)
+
+        root = QVBoxLayout(self)
+
+        # LED grid
+        grid_box = QGroupBox("LED grid (pixels per side)")
+        grid_form = QFormLayout(grid_box)
+        self.spin_gw = QSpinBox(); self.spin_gw.setRange(8, 1024); self.spin_gw.setValue(grid_w)
+        self.spin_gh = QSpinBox(); self.spin_gh.setRange(8, 1024); self.spin_gh.setValue(grid_h)
+        grid_form.addRow("Width:",  self.spin_gw)
+        grid_form.addRow("Height:", self.spin_gh)
+        root.addWidget(grid_box)
+
+        # Window hint
+        win_box = QGroupBox("Target window size (screen pixels, 0 = auto)")
+        win_form = QFormLayout(win_box)
+        self.spin_ww = QSpinBox(); self.spin_ww.setRange(0, 7680); self.spin_ww.setValue(win_w)
+        self.spin_wh = QSpinBox(); self.spin_wh.setRange(0, 4320); self.spin_wh.setValue(win_h)
+        win_form.addRow("Width:",  self.spin_ww)
+        win_form.addRow("Height:", self.spin_wh)
+        root.addWidget(win_box)
+
+        hint = QLabel(
+            "LED cells are auto-sized to fit the window evenly.\n"
+            "Cells stay square — extra space goes on the longer axis."
+        )
+        hint.setStyleSheet("color: #888; font-style: italic;")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def values(self) -> tuple[int, int, int, int]:
+        return (
+            self.spin_gw.value(), self.spin_gh.value(),
+            self.spin_ww.value(), self.spin_wh.value(),
+        )
 
 
 class SettingsPanel(QWidget):
@@ -13,6 +69,8 @@ class SettingsPanel(QWidget):
     refresh_changed = pyqtSignal(int)
     cycle_changed = pyqtSignal(int)
     credentials_changed = pyqtSignal(str, str)
+    display_size_changed = pyqtSignal(str)              # preset key
+    custom_display_size_changed = pyqtSignal(int, int, int, int)  # gw,gh,ww,wh
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -23,6 +81,25 @@ class SettingsPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         layout.setContentsMargins(8, 8, 8, 8)
+
+        # ── Display Size ──────────────────────────────────────
+        disp_box = QGroupBox("Display Size")
+        disp_layout = QVBoxLayout(disp_box)
+        self.combo_display = QComboBox()
+        for key, label, _w, _h in DISPLAY_SIZES:
+            self.combo_display.addItem(label, key)
+        self.combo_display.addItem(CUSTOM_ITEM[1], CUSTOM_ITEM[0])
+        for i in range(self.combo_display.count()):
+            if self.combo_display.itemData(i) == DEFAULT_SIZE_KEY:
+                self.combo_display.setCurrentIndex(i)
+                break
+        self.combo_display.currentIndexChanged.connect(self._on_display_change)
+        disp_layout.addWidget(self.combo_display)
+        # Track last preset so we can revert on dialog cancel
+        self._last_display_idx = self.combo_display.currentIndex()
+        self._custom_grid = (80, 40)
+        self._custom_win = (0, 0)
+        layout.addWidget(disp_box)
 
         # ── Location ──────────────────────────────────────────
         loc_box = QGroupBox("Location")
@@ -136,6 +213,28 @@ class SettingsPanel(QWidget):
     def _on_radius(self, val: int):
         self.lbl_radius.setText(f"{val} km")
         self.radius_changed.emit(float(val))
+
+    def _on_display_change(self, _idx: int):
+        key = self.combo_display.currentData()
+        if key == CUSTOM_ITEM[0]:
+            gw, gh = self._custom_grid
+            ww, wh = self._custom_win
+            dlg = CustomSizeDialog(self, grid_w=gw, grid_h=gh, win_w=ww, win_h=wh)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                gw, gh, ww, wh = dlg.values()
+                self._custom_grid = (gw, gh)
+                self._custom_win = (ww, wh)
+                self._last_display_idx = self.combo_display.currentIndex()
+                self.custom_display_size_changed.emit(gw, gh, ww, wh)
+            else:
+                # Cancelled — revert dropdown
+                self.combo_display.blockSignals(True)
+                self.combo_display.setCurrentIndex(self._last_display_idx)
+                self.combo_display.blockSignals(False)
+            return
+        if key:
+            self._last_display_idx = self.combo_display.currentIndex()
+            self.display_size_changed.emit(key)
 
     def _manual_location(self):
         try:

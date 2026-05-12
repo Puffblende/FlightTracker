@@ -105,39 +105,49 @@ CHAR_SPACING = 1  # pixels between characters
 LINE_SPACING = 1  # pixels between lines
 
 
-def char_width() -> int:
-    return CHAR_W + CHAR_SPACING
+def char_width(scale: int = 1) -> int:
+    return (CHAR_W + CHAR_SPACING) * scale
 
 
-def text_width(text: str) -> int:
-    return len(text) * char_width() - CHAR_SPACING
+def text_width(text: str, scale: int = 1) -> int:
+    return (len(text) * (CHAR_W + CHAR_SPACING) - CHAR_SPACING) * scale
 
 
 def draw_char(pixels, x: int, y: int, char: str,
-              color: tuple, w: int = 80, h: int = 40,
-              clip_x: int = 80) -> None:
-    """Draw one character; clip_x is the exclusive right pixel boundary."""
+              color: tuple, w: int, h: int,
+              clip_x: int, scale: int = 1) -> None:
+    """Draw one character at integer pixel scale. clip_x is exclusive right edge."""
     rows = FONT_5X7.get(char, FONT_5X7.get(' '))
     for ry, bits in enumerate(rows):
-        py = y + ry
-        if py < 0 or py >= h:
-            continue
         for bx in range(5):
-            if bits & (1 << (4 - bx)):
-                px = x + bx
-                if 0 <= px < w and px < clip_x:
-                    pixels[py][px] = color
+            if not (bits & (1 << (4 - bx))):
+                continue
+            # Paint a scale×scale block per font pixel
+            for dy in range(scale):
+                py = y + ry * scale + dy
+                if py < 0 or py >= h:
+                    continue
+                for dx in range(scale):
+                    px = x + bx * scale + dx
+                    if 0 <= px < w and px < clip_x:
+                        pixels[py][px] = color
 
 
 def draw_text(pixels, x: int, y: int, text: str,
-              color: tuple, w: int = 80, h: int = 40,
-              max_width: int = 0) -> int:
-    """Draw text left-to-right.  max_width > 0 hard-clips to that many pixels."""
+              color: tuple, w: int | None = None, h: int | None = None,
+              max_width: int = 0, scale: int = 1) -> int:
+    """Draw text left-to-right at integer scale (1, 2, 3 ...).
+    w/h default to buffer dimensions when None."""
+    if h is None:
+        h = len(pixels)
+    if w is None:
+        w = len(pixels[0]) if h else 0
     clip_x = (x + max_width) if max_width > 0 else w
+    cw = (CHAR_W + CHAR_SPACING) * scale
     cx = x
     for ch in text:
         if cx >= clip_x:
             break
-        draw_char(pixels, cx, y, ch, color, w, h, clip_x)
-        cx += char_width()
+        draw_char(pixels, cx, y, ch, color, w, h, clip_x, scale)
+        cx += cw
     return cx

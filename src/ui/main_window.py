@@ -14,6 +14,7 @@ from src.core.models import (
     fmt_altitude, fmt_speed, fmt_distance,
 )
 from src.core.renderer import render_frame
+from src.core.displays import set_display_size, set_custom_display
 from src.ui.led_widget import LEDWidget
 from src.ui.settings_panel import SettingsPanel
 from src.ui.layout_editor import LayoutEditorWidget
@@ -23,6 +24,7 @@ class _Worker(QObject):
     """Signals for cross-thread communication."""
     location_ready = pyqtSignal(object)    # Location
     flights_ready = pyqtSignal(list)       # list[Flight]
+    flights_enriched = pyqtSignal()        # refresh display, no re-enrich
     error = pyqtSignal(str)
 
 
@@ -43,6 +45,7 @@ class MainWindow(QMainWindow):
         self._worker = _Worker()
         self._worker.location_ready.connect(self._on_location)
         self._worker.flights_ready.connect(self._on_flights)
+        self._worker.flights_enriched.connect(self._on_enriched)
         self._worker.error.connect(self._on_error)
 
         self._build_ui()
@@ -88,6 +91,8 @@ class MainWindow(QMainWindow):
             lambda v: self._cycle_timer.setInterval(v * 1000)
         )
         self._settings.credentials_changed.connect(self._on_credentials)
+        self._settings.display_size_changed.connect(self._on_display_size_changed)
+        self._settings.custom_display_size_changed.connect(self._on_custom_display_changed)
         root.addWidget(self._settings)
 
 
@@ -212,7 +217,7 @@ class MainWindow(QMainWindow):
 
         def run():
             try:
-                from src.api.opensky import fetch_flights
+                from src.api.flights import fetch_flights, last_source
                 flights = fetch_flights(loc, radius, user, pw)
                 self._worker.flights_ready.emit(flights)
             except Exception as e:
@@ -236,8 +241,10 @@ class MainWindow(QMainWindow):
         self._update_display()
         self._update_flight_list()
         self._sb_count.setText(f"Flights: {len(flights)}")
+        import src.api.flights as flights_mod
+        src = f" via {flights_mod.last_source}" if flights_mod.last_source else ""
         self._sb_status.setText(
-            f"Updated — {len(flights)} aircraft in range"
+            f"Updated — {len(flights)} aircraft in range{src}"
         )
 
         # Prefetch aircraft types in background
@@ -248,11 +255,29 @@ class MainWindow(QMainWindow):
         ).start()
 
     def _enrich_types(self, flights: list[Flight]):
-        from src.api.opensky import fetch_aircraft_type
+        from src.api.flights import fetch_aircraft_type
+        from src.api.routes import lookup_route
+        changed = False
         for f in flights[:10]:  # limit to top 10 nearest
             if not f.aircraft_type:
-                typ = fetch_aircraft_type(f.icao24, self._os_user, self._os_pass)
-                f.aircraft_type = typ
+                # adsb.lol usually already fills this; only fall back to OpenSky
+                # metadata when adsb.lol didn't return a type.
+                f.aircraft_type = fetch_aircraft_type(
+                    f.icao24, self._os_user, self._os_pass
+                )
+            if not f.origin or not f.destination:
+                o, d = lookup_route(f.display_callsign)
+                if o or d:
+                    f.origin = f.origin or o
+                    f.destination = f.destination or d
+                    changed = True
+        if changed:
+            self._worker.flights_enriched.emit()
+
+    def _on_enriched(self):
+        # Background enrichment filled in route data — refresh display + list
+        self._update_display()
+        self._update_flight_list()
 
     def _on_error(self, msg: str):
         self._sb_status.setText(f"Error: {msg}")
@@ -267,6 +292,20 @@ class MainWindow(QMainWindow):
 
     def _on_layout_changed(self, blocks: list):
         self._layout = blocks
+        self._redraw_led()
+
+    def _on_display_size_changed(self, key: str):
+        set_display_size(key)
+        self._apply_size_change()
+
+    def _on_custom_display_changed(self, gw: int, gh: int, ww: int, wh: int):
+        set_custom_display(gw, gh, ww, wh)
+        self._apply_size_change()
+
+    def _apply_size_change(self):
+        self._led.apply_display_size()
+        self._editor.apply_display_size()
+        self._layout = self._editor.get_layout()
         self._redraw_led()
 
     def _on_list_click(self, item: QListWidgetItem):
@@ -302,6 +341,9 @@ class MainWindow(QMainWindow):
         flight = self._flights[self._current_idx] if self._flights else None
         buf = render_frame(flight, self._layout)
         self._led.set_buffer(buf)
+        # Mirror the same flight to the layout editor's preview
+        if hasattr(self, "_editor"):
+            self._editor.set_flight(flight)
 
     def _update_flight_list(self):
         self._flight_list.clear()

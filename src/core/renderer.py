@@ -1,23 +1,22 @@
-"""Renders one flight's data onto an 80×40 LED pixel buffer."""
+"""Renders one flight's data onto the LED pixel buffer."""
 from __future__ import annotations
 from PIL import Image
 from src.core.models import (
-    Flight, LayoutBlock, BLOCK_TYPE_MAP,
-    fmt_altitude, fmt_speed, fmt_track, fmt_vrate, fmt_distance, fmt_route,
+    Flight, LayoutBlock, render_block_text,
 )
-from src.core.font import draw_text, char_width, CHAR_H
+from src.core.font import draw_text, char_width, text_width, CHAR_H
 from src.api.logos import get_logo, prefetch_async
+from src.core.displays import get_display_size
+from src.core.progress import flight_progress, remaining_distance_km
 
-W = 80
-H = 40
 BG = (0, 0, 0)
 
 
-def _new_buffer():
-    return [[BG] * W for _ in range(H)]
+def _new_buffer(w: int, h: int):
+    return [[BG] * w for _ in range(h)]
 
 
-def _paste_pil(buf, img: Image.Image, x: int, y: int) -> None:
+def _paste_pil(buf, img: Image.Image, x: int, y: int, W: int, H: int) -> None:
     pw, ph = img.size
     pixels = img.load()
     for iy in range(ph):
@@ -28,17 +27,111 @@ def _paste_pil(buf, img: Image.Image, x: int, y: int) -> None:
 
 
 def _txt(buf, block: LayoutBlock, text: str) -> None:
-    """Draw text clipped to the block's declared pixel width."""
     draw_text(buf, block.x, block.y, text, block.color,
-              max_width=block.width)
+              max_width=block.width, scale=block.font_scale)
 
 
-def _render_block(buf, block: LayoutBlock, flight: Flight) -> None:
+# 7×7 plane glyph viewed top-down, nose up. Wings are at row 3 (centre)
+# so they land on the bar row when the plane is drawn centred on it.
+PLANE_GLYPH = [
+    "...X...",
+    "...X...",
+    "..XXX..",
+    "XXXXXXX",
+    "..XXX..",
+    "...X...",
+    ".XX.XX.",
+]
+
+
+def _draw_plane(buf, cx: int, cy: int, color: tuple, W: int, H: int) -> None:
+    """Draw the plane glyph centred horizontally on cx, with the wings at cy."""
+    for gy, row in enumerate(PLANE_GLYPH):
+        for gx, ch in enumerate(row):
+            if ch != "X":
+                continue
+            x = cx + gx - 3
+            y = cy + gy - 3   # row 3 (wings) sits on the bar row
+            if 0 <= x < W and 0 <= y < H:
+                buf[y][x] = color
+
+
+def _draw_progress(buf, block: LayoutBlock, flight: Flight, W: int, H: int) -> None:
+    x0, y0 = block.x, block.y
+    width = max(4, block.width)
+    color = block.color
+    plane_color = tuple(block.plane_color) if block.plane_color is not None else color
+
+    # The bar sits in the vertical centre of the plane area
+    bar_block_h = 7 if block.show_plane else 3
+    bar_y = y0 + bar_block_h // 2
+
+    prog = flight_progress(flight)
+    pos = int(round((width - 1) * max(0.0, min(1.0, prog)))) if prog is not None else None
+
+    # ── Draw the bar ──
+    if block.show_remaining:
+        # Full route with completed (solid) + remaining (dim) portions
+        dim = tuple(c // 4 for c in color)
+        for i in range(width):
+            bx = x0 + i
+            if not (0 <= bx < W and 0 <= bar_y < H):
+                continue
+            if pos is None:
+                buf[bar_y][bx] = dim
+            elif i <= pos:
+                buf[bar_y][bx] = color
+            else:
+                buf[bar_y][bx] = dim
+    else:
+        # Only the completed portion is drawn — bar ends at the aircraft.
+        # If progress is unknown, draw nothing.
+        if pos is not None:
+            for i in range(pos + 1):
+                bx = x0 + i
+                if 0 <= bx < W and 0 <= bar_y < H:
+                    buf[bar_y][bx] = color
+
+    # ── Endpoint dots (origin + destination), independent of show_remaining ──
+    if block.show_endpoints:
+        for end_x in (x0, x0 + width - 1):
+            for dy_ in (-1, 0):
+                for dx_ in (-1, 0, 1):
+                    px, py = end_x + dx_, bar_y + dy_
+                    if 0 <= px < W and 0 <= py < H:
+                        buf[py][px] = color
+
+    # ── Marker / plane ──
+    if pos is not None:
+        marker_x = x0 + pos
+        if block.show_plane:
+            _draw_plane(buf, marker_x, bar_y, plane_color, W, H)
+        else:
+            for dx_ in (-1, 0, 1):
+                bx = marker_x + dx_
+                if 0 <= bx < W and 0 <= bar_y < H:
+                    buf[bar_y][bx] = plane_color
+            if 0 <= bar_y - 1 < H and 0 <= marker_x < W:
+                buf[bar_y - 1][marker_x] = plane_color
+
+    # ── Remaining distance text (below the bar block) ──
+    if block.show_remaining:
+        rem = remaining_distance_km(flight)
+        if rem is not None:
+            unit = block.effective_unit or "km"
+            txt = f"{int(rem)}{unit}"
+            tw = text_width(txt, block.font_scale)
+            tx = x0 + max(0, width - tw)
+            ty = y0 + bar_block_h + 1
+            draw_text(buf, tx, ty, txt, color,
+                      max_width=width, scale=block.font_scale)
+
+
+def _render_block(buf, block: LayoutBlock, flight: Flight, W: int, H: int) -> None:
     key = block.key
-    fmt = block.fmt
 
     if key == "logo":
-        size = block.width  # always square
+        size = block.width
         iata = flight.airline_iata
         icao = flight.airline_icao
         if iata or icao:
@@ -47,78 +140,39 @@ def _render_block(buf, block: LayoutBlock, flight: Flight) -> None:
         else:
             from src.api.logos import _generic_plane
             logo = _generic_plane(size, size)
-        _paste_pil(buf, logo, block.x, block.y)
+        _paste_pil(buf, logo, block.x, block.y, W, H)
+        return
 
-    elif key == "airline":
-        name = flight.airline_name or flight.airline_icao or flight.callsign[:3]
-        if fmt == "short":
-            text = name.split()[0][:8].upper() if name else "---"
-        elif fmt == "icao":
-            text = (flight.airline_icao or flight.callsign[:3]).upper()
-        else:
-            text = name.upper()
-        _txt(buf, block, text)
+    if key == "progress":
+        _draw_progress(buf, block, flight, W, H)
+        return
 
-    elif key == "callsign":
-        if fmt == "icao24":
-            _txt(buf, block, flight.icao24.upper())
-        else:
-            _txt(buf, block, flight.display_callsign)
-
-    elif key == "route":
-        _txt(buf, block, fmt_route(flight, fmt))
-
-    elif key == "aircraft_type":
-        typ = flight.aircraft_type or "----"
-        if fmt == "full":
-            _txt(buf, block, typ.upper())
-        else:
-            _txt(buf, block, typ[:4].upper())
-
-    elif key == "altitude":
-        _txt(buf, block, fmt_altitude(flight.baro_altitude, fmt))
-
-    elif key == "speed":
-        _txt(buf, block, fmt_speed(flight.velocity, fmt))
-
-    elif key == "track":
-        _txt(buf, block, fmt_track(flight.true_track, fmt))
-
-    elif key == "vrate":
-        _txt(buf, block, fmt_vrate(flight.vertical_rate, fmt))
-
-    elif key == "squawk":
-        sq = flight.squawk or "----"
-        text = f"SQ:{sq[:4]}" if fmt == "label" else sq[:4]
-        _txt(buf, block, text)
-
-    elif key == "country":
-        _txt(buf, block, flight.origin_country.upper())
-
-    elif key == "distance":
-        _txt(buf, block, fmt_distance(flight.distance_km, fmt))
+    # All text blocks
+    _txt(buf, block, render_block_text(block, flight))
 
 
 def render_frame(flight, blocks: list) -> list:
-    """Return an 80×40 RGB pixel buffer for the given flight and layout."""
-    buf = _new_buffer()
+    W, H = get_display_size()
+    buf = _new_buffer(W, H)
     if flight is None:
         msg = "NO FLIGHTS"
-        cx = (W - len(msg) * char_width()) // 2
-        cy = (H - CHAR_H) // 2
+        cx = max(0, (W - len(msg) * char_width()) // 2)
+        cy = max(0, (H - CHAR_H) // 2)
         draw_text(buf, cx, cy, msg, (80, 80, 80))
         return buf
 
     for block in blocks:
         if block.enabled:
             try:
-                _render_block(buf, block, flight)
+                _render_block(buf, block, flight, W, H)
             except Exception:
                 pass
     return buf
 
 
 def buffer_to_pil(buf: list) -> Image.Image:
+    H = len(buf)
+    W = len(buf[0]) if H else 0
     img = Image.new("RGB", (W, H))
     px = img.load()
     for y in range(H):
