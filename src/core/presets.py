@@ -29,6 +29,7 @@ def _block_to_dict(b: LayoutBlock) -> dict:
         "show_plane":     b.show_plane,
         "show_endpoints": b.show_endpoints,
         "plane_color":   list(b.plane_color) if b.plane_color else None,
+        "recognize_emergencies": b.recognize_emergencies,
     }
 
 
@@ -47,6 +48,7 @@ def _block_from_dict(d: dict) -> LayoutBlock:
         show_plane=d.get("show_plane", False),
         show_endpoints=d.get("show_endpoints", False),
         plane_color=tuple(pc) if pc else None,
+        recognize_emergencies=d.get("recognize_emergencies", False),
     )
 
 
@@ -72,6 +74,24 @@ def load_preset(name: str) -> dict | None:
         return None
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def delete_preset(name: str) -> bool:
+    """Delete a preset file. Returns True if it existed and was removed."""
+    path = PRESETS_DIR / f"{name}.json"
+    if not path.exists():
+        return False
+    try:
+        path.unlink()
+    except OSError:
+        return False
+    # Clear last-preset pointer if this was the active one
+    if get_last_preset() == name:
+        try:
+            _LAST_FILE.unlink()
+        except OSError:
+            pass
+    return True
 
 
 def get_last_preset() -> str | None:

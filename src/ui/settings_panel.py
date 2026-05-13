@@ -65,6 +65,7 @@ class CustomSizeDialog(QDialog):
 
 class SettingsPanel(QWidget):
     location_requested = pyqtSignal()
+    geocode_requested = pyqtSignal(str)        # free-form address query
     radius_changed = pyqtSignal(float)
     refresh_changed = pyqtSignal(int)
     cycle_changed = pyqtSignal(int)
@@ -109,6 +110,19 @@ class SettingsPanel(QWidget):
         self.lbl_location.setWordWrap(True)
         loc_form.addWidget(self.lbl_location)
 
+        # Address search (street + city, like Google Maps)
+        search_row = QHBoxLayout()
+        self.txt_search = QLineEdit()
+        self.txt_search.setPlaceholderText("Street, city or place…")
+        self.txt_search.returnPressed.connect(self._search_address)
+        btn_search = QPushButton("Find")
+        btn_search.setMaximumWidth(45)
+        btn_search.clicked.connect(self._search_address)
+        search_row.addWidget(self.txt_search)
+        search_row.addWidget(btn_search)
+        loc_form.addLayout(search_row)
+
+        # Lat/lon row (2 decimal places)
         row = QHBoxLayout()
         self.txt_lat = QLineEdit()
         self.txt_lat.setPlaceholderText("Lat")
@@ -246,19 +260,23 @@ class SettingsPanel(QWidget):
         except ValueError:
             pass
 
+    def _search_address(self):
+        query = self.txt_search.text().strip()
+        if query:
+            self.geocode_requested.emit(query)
+
     def _apply_location(self, loc):
-        from src.core.models import Location
         self.lbl_location.setText(
             f"{loc.city}, {loc.country}\n"
-            f"({loc.lat:.4f}, {loc.lon:.4f})"
+            f"({loc.lat:.2f}, {loc.lon:.2f})"
         )
 
     def set_location(self, loc):
         self.lbl_location.setText(
-            f"{loc.city}, {loc.country}\n({loc.lat:.4f}, {loc.lon:.4f})"
+            f"{loc.city}, {loc.country}\n({loc.lat:.2f}, {loc.lon:.2f})"
         )
-        self.txt_lat.setText(f"{loc.lat:.5f}")
-        self.txt_lon.setText(f"{loc.lon:.5f}")
+        self.txt_lat.setText(f"{loc.lat:.2f}")
+        self.txt_lon.setText(f"{loc.lon:.2f}")
 
     @property
     def radius(self) -> float:

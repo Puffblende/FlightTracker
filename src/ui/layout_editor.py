@@ -134,10 +134,8 @@ def _render_progress_to_pixmap(block: LayoutBlock, grid_scale: int) -> QPixmap:
                 for dx_ in (-1, 0, 1):
                     put(ex + dx_, bar_y + dy_, color)
 
-    # Aircraft marker (3-wide pip + 1 tick above)
-    for dx in (-1, 0, 1):
-        put(pos + dx, bar_y, color)
-    put(pos, bar_y - 1, color)
+    # No standalone marker — bar's end (or solid → dotted transition) shows
+    # where the aircraft is. Keeps the bar a straight horizontal line.
 
     return QPixmap.fromImage(img)
 
@@ -154,6 +152,7 @@ class BlockItem(QGraphicsRectItem):
         self._pw = panel_w
         self._ph = panel_h
         self._on_select = on_select
+        self._dragging = False
 
         w = max(1, block.width) * grid_scale
         h = max(1, block.height) * grid_scale
@@ -196,9 +195,17 @@ class BlockItem(QGraphicsRectItem):
                                        max_led_px=block.width)
 
     def mousePressEvent(self, event):
+        # Track drag state so the editor skips rebuilds while the user is
+        # holding the mouse — otherwise a flight-cycle tick would swap the
+        # item out from under the drag and snap the block back to (0, 0).
+        self._dragging = True
         if self._on_select:
             self._on_select(self.block.key)
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._dragging = False
+        super().mouseReleaseEvent(event)
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
@@ -264,6 +271,8 @@ class CustomizationPanel(QGroupBox):
     width_changed   = pyqtSignal(str, int)
     show_remaining_changed = pyqtSignal(str, bool)
     show_endpoints_changed = pyqtSignal(str, bool)
+    recognize_emergencies_changed = pyqtSignal(str, bool)
+    test_emergency_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__("Customize — (select a block)", parent)
@@ -355,6 +364,31 @@ class CustomizationPanel(QGroupBox):
         self._prog_widget.setLayout(prog)
         root.addWidget(self._prog_widget)
 
+        # Row 4: squawk-specific — emergency monitoring
+        sq = QHBoxLayout()
+        sq.setSpacing(8)
+        self.cb_emergencies = QCheckBox("Recognize Emergencies")
+        self.cb_emergencies.setToolTip(
+            "When any visible flight squawks 7500 / 7600 / 7601 / 7700,\n"
+            "flash a red border around the LED panel and the squawk code itself."
+        )
+        self.cb_emergencies.toggled.connect(
+            lambda v: self._emit(self.recognize_emergencies_changed, bool(v))
+        )
+        sq.addWidget(self.cb_emergencies)
+        self.btn_test_emergency = QPushButton("Test Emergency")
+        self.btn_test_emergency.setToolTip(
+            "Trigger the emergency flash for 5 seconds (preview only)."
+        )
+        self.btn_test_emergency.clicked.connect(
+            lambda: self.test_emergency_requested.emit()
+        )
+        sq.addWidget(self.btn_test_emergency)
+        sq.addStretch()
+        self._squawk_widget = QWidget()
+        self._squawk_widget.setLayout(sq)
+        root.addWidget(self._squawk_widget)
+
     def _emit(self, signal, value):
         if self._building or self._block is None:
             return
@@ -372,6 +406,7 @@ class CustomizationPanel(QGroupBox):
                 self.label_edit.clear()
                 self.unit_edit.clear()
                 self._prog_widget.setVisible(False)
+                self._squawk_widget.setVisible(False)
                 return
 
             self.setTitle(f"Customize — {block.label}")
@@ -407,6 +442,11 @@ class CustomizationPanel(QGroupBox):
                 self.font_spin.setEnabled(False)
             else:
                 self.font_spin.setEnabled(True)
+
+            is_squawk = block.key == "squawk"
+            self._squawk_widget.setVisible(is_squawk)
+            if is_squawk:
+                self.cb_emergencies.setChecked(block.recognize_emergencies)
         finally:
             self._building = False
 
@@ -443,6 +483,7 @@ class CustomizationPanel(QGroupBox):
 
 class LayoutEditorWidget(QWidget):
     layout_changed = pyqtSignal(list)
+    test_emergency_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -460,10 +501,16 @@ class LayoutEditorWidget(QWidget):
     def set_flight(self, flight: Flight | None):
         """Live flight whose values feed the preview rectangles."""
         self._flight = flight
-        # Rebuild all canvas items so they pick up new values
+        # Rebuild all canvas items so they pick up new values — but skip any
+        # item that's currently being dragged, otherwise the in-progress drag
+        # would be replaced by a fresh BlockItem at the saved position.
         for block in self._blocks:
-            if block.enabled:
-                self._rebuild_item(block)
+            if not block.enabled:
+                continue
+            existing = self._items.get(block.key)
+            if existing is not None and getattr(existing, "_dragging", False):
+                continue
+            self._rebuild_item(block)
 
     def apply_display_size(self):
         self._build_canvas()
@@ -516,10 +563,16 @@ class LayoutEditorWidget(QWidget):
 
         right = QVBoxLayout()
         right.setSpacing(10)
+        # Preview canvas anchored to the TOP, customize panel anchored to the
+        # BOTTOM; the stretch in between absorbs the height the customize
+        # panel gives back/asks for when its content changes (progress / squawk
+        # rows appearing or disappearing). That way the preview stays put.
         self._canvas_container = QWidget()
         self._canvas_layout = QVBoxLayout(self._canvas_container)
         self._canvas_layout.setContentsMargins(0, 0, 0, 0)
-        right.addWidget(self._canvas_container)
+        right.addWidget(self._canvas_container, 0, Qt.AlignmentFlag.AlignTop)
+
+        right.addStretch(1)
 
         self._custom = CustomizationPanel()
         self._custom.color_changed.connect(self._on_color)
@@ -530,7 +583,10 @@ class LayoutEditorWidget(QWidget):
         self._custom.width_changed.connect(self._on_width)
         self._custom.show_remaining_changed.connect(self._on_show_remaining)
         self._custom.show_endpoints_changed.connect(self._on_show_endpoints)
-        right.addWidget(self._custom)
+        self._custom.recognize_emergencies_changed.connect(self._on_recognize_emergencies)
+        # Forward the "Test Emergency" button click to MainWindow via re-emit
+        self._custom.test_emergency_requested.connect(self.test_emergency_requested.emit)
+        right.addWidget(self._custom, 0, Qt.AlignmentFlag.AlignBottom)
 
         right_container = QWidget()
         right_container.setLayout(right)
@@ -587,6 +643,12 @@ class LayoutEditorWidget(QWidget):
             t.setPos(-18, y * self._GS - 5)
 
     def _populate(self):
+        # Refresh dims first — set_layout() may have been called after
+        # set_display_size() but before apply_display_size(), leaving _W/_H
+        # stale. Clamping with stale dims used to destroy loaded positions.
+        cur_w, cur_h = get_display_size()
+        if cur_w != self._W or cur_h != self._H:
+            self._build_canvas()
         for item in list(self._items.values()):
             self._scene.removeItem(item)
         self._items.clear()
@@ -708,6 +770,12 @@ class LayoutEditorWidget(QWidget):
         if b is None: return
         b.show_endpoints = v
         self._rebuild_item(b)
+        self._emit()
+
+    def _on_recognize_emergencies(self, key: str, v: bool):
+        b = next((b for b in self._blocks if b.key == key), None)
+        if b is None: return
+        b.recognize_emergencies = v
         self._emit()
 
     # ── reset / shared ────────────────────────────────────────────────────────

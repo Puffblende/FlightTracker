@@ -113,8 +113,8 @@ BLOCK_FORMATS: dict[str, list[FormatSpec]] = {
         FormatSpec("arr",   "LAX  (arrival)",    3, "", ""),
     ],
     "aircraft_type": [
-        FormatSpec("code", "B738  (ICAO code)",            4,  "", ""),
-        FormatSpec("full", "Boeing 737-800  (full name)", 15,  "", ""),
+        FormatSpec("code", "B738  (ICAO code)",        4,  "", ""),
+        FormatSpec("full", "B737-800  (full name)",   13,  "", ""),
     ],
     "altitude": [
         FormatSpec("ft_full",    "36000  (ft)",        5, "A:", "ft"),
@@ -226,6 +226,8 @@ class LayoutBlock:
     show_plane: bool = False
     show_endpoints: bool = False
     plane_color: tuple | None = None      # progress: plane glyph color; None=bar color
+    # Squawk-block emergency monitoring (7500/7600/7601/7700 → flash + red border)
+    recognize_emergencies: bool = False
 
     def __post_init__(self):
         if not self.fmt:

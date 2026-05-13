@@ -1,6 +1,7 @@
 """Main application window."""
 from __future__ import annotations
 import threading
+import time
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QTabWidget,
     QLabel, QPushButton, QListWidget, QListWidgetItem, QSplitter,
@@ -15,12 +16,13 @@ from src.core.models import (
     fmt_altitude, fmt_speed, fmt_distance,
 )
 from src.core.renderer import render_frame
+from src.core.emergencies import EMERGENCY_SQUAWKS, is_emergency_squawk
 from src.core.displays import (
     set_display_size, set_custom_display, get_display_key,
     DEFAULT_SIZE_KEY, CUSTOM_KEY,
 )
 from src.core.presets import (
-    list_presets, save_preset, load_preset,
+    list_presets, save_preset, load_preset, delete_preset,
     get_last_preset, set_last_preset,
     build_preset_data, layout_from_preset,
 )
@@ -60,6 +62,11 @@ class MainWindow(QMainWindow):
         # Overlay
         self._overlay: OverlayWindow | None = None
 
+        # Emergency state
+        self._emergency_active: bool = False
+        self._emergency_flash: bool = True       # True = visible / red, False = blank
+        self._emergency_test_until: float = 0.0  # epoch seconds, 0 = no test running
+
         self._worker = _Worker()
         self._worker.location_ready.connect(self._on_location)
         self._worker.flights_ready.connect(self._on_flights)
@@ -93,15 +100,15 @@ class MainWindow(QMainWindow):
 
         vbox.addWidget(self._build_preset_bar())
 
-        tabs = QTabWidget()
-        tabs.setDocumentMode(True)
-        tabs.addTab(self._build_display_tab(),  "Display")
-        tabs.addTab(self._build_editor_tab(),   "Layout Editor")
-        tabs.addTab(self._build_list_tab(),     "Flight List")
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        self._tabs.addTab(self._build_display_tab(),  "Display")
+        self._tabs.addTab(self._build_editor_tab(),   "Layout Editor")
+        self._tabs.addTab(self._build_list_tab(),     "Flight List")
 
         self._external_tab = ExternalDisplayTab()
-        tabs.addTab(self._external_tab, "External Display")
-        vbox.addWidget(tabs)
+        self._tabs.addTab(self._external_tab, "External Display")
+        vbox.addWidget(self._tabs)
 
         # Status bar
         self._sb_location = QLabel("Location: detecting…")
@@ -159,6 +166,12 @@ class MainWindow(QMainWindow):
         btn_new.clicked.connect(self._new_preset)
         h.addWidget(btn_new)
 
+        self._btn_delete = QPushButton("Delete")
+        self._btn_delete.setToolTip("Delete the currently selected preset")
+        self._btn_delete.setEnabled(False)
+        self._btn_delete.clicked.connect(self._delete_current_preset)
+        h.addWidget(self._btn_delete)
+
         h.addStretch()
 
         self._btn_overlay = QPushButton("⧉  Launch Overlay")
@@ -178,6 +191,7 @@ class MainWindow(QMainWindow):
         # Left: settings panel
         self._settings = SettingsPanel()
         self._settings.location_requested.connect(self._fetch_location)
+        self._settings.geocode_requested.connect(self._geocode_address)
         self._settings.radius_changed.connect(self._on_radius_changed)
         self._settings.refresh_changed.connect(self._on_refresh_changed)
         self._settings.cycle_changed.connect(self._on_cycle_changed)
@@ -253,6 +267,7 @@ class MainWindow(QMainWindow):
 
         self._editor = LayoutEditorWidget()
         self._editor.layout_changed.connect(self._on_layout_changed)
+        self._editor.test_emergency_requested.connect(self._start_emergency_test)
         layout.addWidget(self._editor)
         return page
 
@@ -284,6 +299,11 @@ class MainWindow(QMainWindow):
         self._cycle_timer.setInterval(5_000)
         self._cycle_timer.timeout.connect(self._next_flight)
         self._cycle_timer.start()
+
+        # Emergency flash: toggles on/off every 500 ms while active.
+        self._flash_timer = QTimer(self)
+        self._flash_timer.setInterval(500)
+        self._flash_timer.timeout.connect(self._on_flash_tick)
 
     # ── Preset management ─────────────────────────────────────────────────────
 
@@ -388,6 +408,7 @@ class MainWindow(QMainWindow):
         self._current_preset = name
         self._dirty = False
         self._btn_save.setEnabled(False)
+        self._btn_delete.setEnabled(True)
         self._refresh_preset_combo()
         self._update_title()
 
@@ -408,6 +429,30 @@ class MainWindow(QMainWindow):
     def _save_as_preset(self):
         """Save As… button handler."""
         self._save_as_impl()
+
+    def _delete_current_preset(self):
+        """Delete the currently selected preset, after confirmation."""
+        name = self._current_preset
+        if not name:
+            return
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Delete Preset")
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setText(f"Delete preset \"{name}\"?")
+        msg.setInformativeText("This cannot be undone.")
+        msg.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        msg.setDefaultButton(QMessageBox.StandardButton.No)
+        if msg.exec() != QMessageBox.StandardButton.Yes:
+            return
+        if delete_preset(name):
+            self._current_preset = None
+            self._dirty = False
+            self._btn_save.setEnabled(False)
+            self._btn_delete.setEnabled(False)
+            self._refresh_preset_combo()
+            self._update_title()
 
     def _new_preset(self):
         """Reset everything to defaults."""
@@ -438,6 +483,7 @@ class MainWindow(QMainWindow):
             self._current_preset = None
             self._dirty = False
             self._btn_save.setEnabled(False)
+            self._btn_delete.setEnabled(False)
             self._refresh_preset_combo()
             self._update_title()
             self._redraw_led()
@@ -507,6 +553,7 @@ class MainWindow(QMainWindow):
             self._current_preset = name
             self._dirty = False
             self._btn_save.setEnabled(False)
+            self._btn_delete.setEnabled(True)
             self._refresh_preset_combo()
             self._update_title()
             self._redraw_led()
@@ -567,6 +614,23 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _geocode_address(self, query: str):
+        """Geocode a free-form address via Nominatim and apply the result."""
+        self._sb_status.setText(f"Searching: {query}…")
+
+        def run():
+            try:
+                from src.api.geocode import geocode
+                loc = geocode(query)
+                if loc is not None:
+                    self._worker.location_ready.emit(loc)
+                else:
+                    self._worker.error.emit(f"No match for: {query}")
+            except Exception as e:
+                self._worker.error.emit(f"Geocode error: {e}")
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _fetch_flights_async(self):
         if self._location is None:
             self._sb_status.setText("Waiting for location…")
@@ -606,6 +670,9 @@ class MainWindow(QMainWindow):
         import src.api.flights as flights_mod
         src = f" via {flights_mod.last_source}" if flights_mod.last_source else ""
         self._sb_status.setText(f"Updated — {len(flights)} aircraft in range{src}")
+
+        # Re-evaluate emergency state on every fresh fetch.
+        self._check_emergency()
 
         threading.Thread(
             target=self._enrich_types,
@@ -706,7 +773,12 @@ class MainWindow(QMainWindow):
 
     def _redraw_led(self):
         flight = self._flights[self._current_idx] if self._flights else None
-        buf    = render_frame(flight, self._layout)
+        # During an emergency, alternate the squawk block on/off so it flashes.
+        flash_squawk = True if not self._emergency_active else self._emergency_flash
+        border_on = self._emergency_active and self._emergency_flash
+        buf = render_frame(flight, self._layout,
+                           flash_squawk=flash_squawk,
+                           emergency_border=border_on)
         self._led.set_buffer(buf)
         if hasattr(self, "_editor"):
             self._editor.set_flight(flight)
@@ -714,6 +786,55 @@ class MainWindow(QMainWindow):
             self._overlay.set_buffer(buf)
         if hasattr(self, "_external_tab"):
             self._external_tab.send_frame(buf)
+
+    # ── Emergency-squawk monitor ──────────────────────────────────────────────
+
+    def _emergency_monitoring_enabled(self) -> bool:
+        """True if any enabled Squawk block has 'Recognize Emergencies' on."""
+        return any(b.enabled and b.key == "squawk" and b.recognize_emergencies
+                   for b in self._layout)
+
+    def _any_emergency_in_traffic(self) -> bool:
+        return any(is_emergency_squawk(f.squawk) for f in self._flights)
+
+    def _check_emergency(self):
+        """Re-evaluate whether emergency mode should be active. Called on every
+        new flight batch and whenever the relevant layout/test state changes."""
+        test_active = time.time() < self._emergency_test_until
+        live_active = (self._emergency_monitoring_enabled()
+                       and self._any_emergency_in_traffic())
+        self._set_emergency(test_active or live_active)
+
+    def _set_emergency(self, active: bool):
+        if active == self._emergency_active:
+            return
+        self._emergency_active = active
+        if active:
+            self._emergency_flash = True
+            self._flash_timer.start()
+        else:
+            self._flash_timer.stop()
+            self._emergency_flash = True   # leave the squawk visible on exit
+        self._redraw_led()
+
+    def _on_flash_tick(self):
+        self._emergency_flash = not self._emergency_flash
+        self._redraw_led()
+        # Test-mode auto-expiry
+        if self._emergency_test_until and time.time() >= self._emergency_test_until:
+            self._emergency_test_until = 0.0
+            self._check_emergency()
+
+    def _start_emergency_test(self):
+        """5-second preview of the emergency flash — triggered by the
+        'Test Emergency' button in the Squawk block's customize panel.
+        Switches to the Display tab so the user actually sees the flash
+        (the button lives on the Layout Editor tab)."""
+        self._emergency_test_until = time.time() + 5.0
+        # Jump to the Display tab — that's where the LED panel + border live
+        if hasattr(self, "_tabs"):
+            self._tabs.setCurrentIndex(0)
+        self._check_emergency()
 
     def _update_flight_list(self):
         self._flight_list.clear()

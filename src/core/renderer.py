@@ -73,15 +73,9 @@ def _draw_progress(buf, block: LayoutBlock, flight: Flight, W: int, H: int) -> N
                     if x0 <= px < x1 and 0 <= py < H:
                         buf[py][px] = color
 
-    # Aircraft position marker (3-wide pip + 1 tick above) — clipped to bar
-    if pos is not None:
-        marker_x = x0 + pos
-        for dx_ in (-1, 0, 1):
-            bx = marker_x + dx_
-            if x0 <= bx < x1 and 0 <= bar_y < H:
-                buf[bar_y][bx] = color
-        if 0 <= bar_y - 1 < H and x0 <= marker_x < x1:
-            buf[bar_y - 1][marker_x] = color
+    # No standalone aircraft-position marker — the bar itself shows the
+    # position (its end when show_remaining is off, or the solid → dotted
+    # transition when it's on). Keeps the bar a clean straight line.
 
     # Remaining-distance text
     if block.show_remaining:
@@ -120,7 +114,35 @@ def _render_block(buf, block: LayoutBlock, flight: Flight, W: int, H: int) -> No
     _txt(buf, block, render_block_text(block, flight))
 
 
-def render_frame(flight, blocks: list) -> list:
+# Emergency border colour and thickness (in LED pixels)
+EMERGENCY_BORDER_RGB = (230, 30, 30)
+EMERGENCY_BORDER_PX  = 2
+
+
+def _paint_emergency_border(buf, W: int, H: int) -> None:
+    """Overwrite the outer 2 LED pixels with red — part of the matrix, not
+    a window-level decoration. Drawn last so it overlays any block content."""
+    r = EMERGENCY_BORDER_RGB
+    t = EMERGENCY_BORDER_PX
+    for y in range(min(t, H)):
+        for x in range(W):
+            buf[y][x] = r
+    for y in range(max(0, H - t), H):
+        for x in range(W):
+            buf[y][x] = r
+    for y in range(H):
+        for x in range(min(t, W)):
+            buf[y][x] = r
+        for x in range(max(0, W - t), W):
+            buf[y][x] = r
+
+
+def render_frame(flight, blocks: list, *,
+                 flash_squawk: bool = True,
+                 emergency_border: bool = False) -> list:
+    """Render an LED buffer. `flash_squawk=False` skips the squawk block
+    (used to flash the code on/off during an emergency). `emergency_border`
+    paints a 2-pixel red ring on the outer LED rows."""
     W, H = get_display_size()
     buf = _new_buffer(W, H)
     if flight is None:
@@ -128,14 +150,22 @@ def render_frame(flight, blocks: list) -> list:
         cx = max(0, (W - len(msg) * char_width()) // 2)
         cy = max(0, (H - CHAR_H) // 2)
         draw_text(buf, cx, cy, msg, (80, 80, 80))
+        if emergency_border:
+            _paint_emergency_border(buf, W, H)
         return buf
 
     for block in blocks:
-        if block.enabled:
-            try:
-                _render_block(buf, block, flight, W, H)
-            except Exception:
-                pass
+        if not block.enabled:
+            continue
+        if block.key == "squawk" and not flash_squawk:
+            continue
+        try:
+            _render_block(buf, block, flight, W, H)
+        except Exception:
+            pass
+
+    if emergency_border:
+        _paint_emergency_border(buf, W, H)
     return buf
 
 
