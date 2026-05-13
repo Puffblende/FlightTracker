@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtGui import QFont, QColor, QKeySequence, QShortcut
 
 from src.core.models import (
     Location, Flight, LayoutBlock, default_layout,
@@ -28,6 +28,7 @@ from src.ui.led_widget import LEDWidget
 from src.ui.settings_panel import SettingsPanel, CUSTOM_ITEM
 from src.ui.layout_editor import LayoutEditorWidget
 from src.ui.overlay_window import OverlayWindow
+from src.ui.external_tab import ExternalDisplayTab
 
 
 class _Worker(QObject):
@@ -70,6 +71,10 @@ class MainWindow(QMainWindow):
         self._refresh_preset_combo()
         self._update_title()
 
+        # Cmd+S / Ctrl+S → save preset
+        sc = QShortcut(QKeySequence.StandardKey.Save, self)
+        sc.activated.connect(self._save_preset)
+
         # Load last used preset, or fall back to auto-detecting location
         last = get_last_preset()
         if last and load_preset(last) is not None:
@@ -93,6 +98,9 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_display_tab(),  "Display")
         tabs.addTab(self._build_editor_tab(),   "Layout Editor")
         tabs.addTab(self._build_list_tab(),     "Flight List")
+
+        self._external_tab = ExternalDisplayTab()
+        tabs.addTab(self._external_tab, "External Display")
         vbox.addWidget(tabs)
 
         # Status bar
@@ -532,9 +540,14 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if self._dirty:
-            if not self._confirm_discard():
-                event.ignore()
-                return
+            if self._current_preset:
+                # Named preset active — auto-save silently so positions are never lost
+                self._save_preset_impl(self._current_preset)
+            else:
+                # No preset name yet — ask what to do
+                if not self._confirm_discard():
+                    event.ignore()
+                    return
         if self._overlay:
             self._overlay.close()
         event.accept()
@@ -699,6 +712,8 @@ class MainWindow(QMainWindow):
             self._editor.set_flight(flight)
         if self._overlay and self._overlay.isVisible():
             self._overlay.set_buffer(buf)
+        if hasattr(self, "_external_tab"):
+            self._external_tab.send_frame(buf)
 
     def _update_flight_list(self):
         self._flight_list.clear()
