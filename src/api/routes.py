@@ -26,8 +26,8 @@ _MIN_INTERVAL = 0.25  # seconds between API calls
 _CACHE_DIR = Path.home() / ".flighttracker"
 _CACHE_FILE = _CACHE_DIR / "routes.json"
 
-# callsign → (origin_iata, dest_iata, "miss" sentinel allowed)
-_cache: dict[str, tuple[str, str]] = {}
+# callsign → (origin_iata, dest_iata, origin_icao, dest_icao)
+_cache: dict[str, tuple[str, str, str, str]] = {}
 _lock = threading.Lock()
 _last_call = 0.0
 
@@ -38,8 +38,12 @@ def _load_disk_cache() -> None:
     try:
         data = json.loads(_CACHE_FILE.read_text())
         for cs, v in data.items():
-            if isinstance(v, list) and len(v) == 2:
-                _cache[cs] = (v[0] or "", v[1] or "")
+            if isinstance(v, list):
+                if len(v) == 4:
+                    _cache[cs] = (v[0] or "", v[1] or "", v[2] or "", v[3] or "")
+                elif len(v) == 2:
+                    # legacy entries — IATA only
+                    _cache[cs] = (v[0] or "", v[1] or "", "", "")
     except Exception:
         pass
 
@@ -69,11 +73,12 @@ def _seed_airport(iata: str, icao: str, lat, lon) -> None:
         _progress.AIRPORTS[icao.upper()] = (lat, lon)
 
 
-def lookup_route(callsign: str) -> tuple[str, str]:
-    """Return (origin_iata, destination_iata) for a callsign, or ("","")."""
+def lookup_route(callsign: str) -> tuple[str, str, str, str]:
+    """Return (origin_iata, dest_iata, origin_icao, dest_icao) for a callsign,
+    or empty strings if unknown."""
     cs = (callsign or "").strip().upper()
     if not cs:
-        return ("", "")
+        return ("", "", "", "")
 
     with _lock:
         if cs in _cache:
@@ -84,7 +89,7 @@ def lookup_route(callsign: str) -> tuple[str, str]:
     if elapsed < _MIN_INTERVAL:
         time.sleep(_MIN_INTERVAL - elapsed)
 
-    origin = destination = ""
+    o_iata = d_iata = o_icao = d_icao = ""
     try:
         r = requests.get(_API.format(cs), timeout=_TIMEOUT)
         _last_call = time.time()
@@ -93,22 +98,18 @@ def lookup_route(callsign: str) -> tuple[str, str]:
             fr = (data.get("response") or {}).get("flightroute") or {}
             o = fr.get("origin") or {}
             d = fr.get("destination") or {}
-            origin = (o.get("iata_code") or "").upper()
-            destination = (d.get("iata_code") or "").upper()
-            _seed_airport(
-                o.get("iata_code") or "",
-                o.get("icao_code") or "",
-                o.get("latitude"), o.get("longitude"),
-            )
-            _seed_airport(
-                d.get("iata_code") or "",
-                d.get("icao_code") or "",
-                d.get("latitude"), d.get("longitude"),
-            )
+            o_iata = (o.get("iata_code") or "").upper()
+            d_iata = (d.get("iata_code") or "").upper()
+            o_icao = (o.get("icao_code") or "").upper()
+            d_icao = (d.get("icao_code") or "").upper()
+            _seed_airport(o_iata, o_icao,
+                          o.get("latitude"), o.get("longitude"))
+            _seed_airport(d_iata, d_icao,
+                          d.get("latitude"), d.get("longitude"))
     except Exception:
         pass
 
     with _lock:
-        _cache[cs] = (origin, destination)
+        _cache[cs] = (o_iata, d_iata, o_icao, d_icao)
         _save_disk_cache()
-    return (origin, destination)
+    return (o_iata, d_iata, o_icao, d_icao)

@@ -107,9 +107,19 @@ class MainWindow(QMainWindow):
 
     def _build_preset_bar(self) -> QWidget:
         bar = QWidget()
+        bar.setObjectName("presetBar")
+        # Scope the dark background to *this* bar by name, so it doesn't
+        # cascade into the combobox's dropdown and break the selection
+        # highlight on Windows.
         bar.setStyleSheet(
-            "QWidget { background: #1e1e1e; border-bottom: 1px solid #3a3a3a; }"
-            "QLabel  { background: transparent; }"
+            "QWidget#presetBar { background: #1e1e1e; border-bottom: 1px solid #3a3a3a; }"
+            "QWidget#presetBar > QLabel { background: transparent; }"
+            "QComboBox QAbstractItemView { "
+            "  background: #232323; color: #dcdcdc; "
+            "  selection-background-color: #2a82da; "
+            "  selection-color: #ffffff; "
+            "  outline: 0; "
+            "}"
         )
         bar.setFixedHeight(36)
 
@@ -599,11 +609,14 @@ class MainWindow(QMainWindow):
                 f.aircraft_type = fetch_aircraft_type(
                     f.icao24, self._os_user, self._os_pass
                 )
-            if not f.origin or not f.destination:
-                o, d = lookup_route(f.display_callsign)
-                if o or d:
-                    f.origin      = f.origin or o
-                    f.destination = f.destination or d
+            if (not f.origin or not f.destination
+                    or not f.origin_icao or not f.destination_icao):
+                o_iata, d_iata, o_icao, d_icao = lookup_route(f.display_callsign)
+                if o_iata or d_iata or o_icao or d_icao:
+                    f.origin           = f.origin           or o_iata
+                    f.destination      = f.destination      or d_iata
+                    f.origin_icao      = f.origin_icao      or o_icao
+                    f.destination_icao = f.destination_icao or d_icao
                     changed = True
         if changed:
             self._worker.flights_enriched.emit()

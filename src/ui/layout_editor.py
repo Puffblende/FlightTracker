@@ -8,8 +8,8 @@ from __future__ import annotations
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGraphicsScene, QGraphicsView,
     QGraphicsRectItem, QGraphicsPixmapItem, QLabel, QPushButton,
-    QScrollArea, QCheckBox, QComboBox, QFrame, QSpinBox, QColorDialog,
-    QLineEdit, QGroupBox, QGraphicsItem,
+    QScrollArea, QCheckBox, QComboBox, QFrame, QSpinBox, QDoubleSpinBox,
+    QColorDialog, QLineEdit, QGroupBox, QGraphicsItem,
 )
 from PyQt6.QtCore import Qt, QPointF, pyqtSignal
 from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPixmap, QImage
@@ -39,31 +39,48 @@ def _grid_scale_for(W: int, H: int) -> int:
 
 # ── Bitmap font → QPixmap (so the preview matches the LED render exactly) ────
 
-def _render_text_to_pixmap(text: str, color: tuple, scale: int,
-                           grid_scale: int) -> QPixmap:
-    """Render text using the LED bitmap font, upscaled to grid_scale."""
+def _render_text_to_pixmap(text: str, color: tuple, scale: float,
+                           grid_scale: int,
+                           max_led_px: int | None = None) -> QPixmap:
+    """Render text using the LED bitmap font with fractional scaling support.
+    `max_led_px` caps the pixmap width to that many LED pixels — anything past
+    that is silently dropped, matching the LED renderer's `max_width` clip."""
     if not text:
         return QPixmap()
-    w_chars = max(1, len(text))
-    px_w = (w_chars * (CHAR_W + CHAR_SPACING) - CHAR_SPACING) * scale
-    px_h = CHAR_H * scale
-    if px_w <= 0 or px_h <= 0:
-        return QPixmap()
+    char_w_out = max(1, int(round(CHAR_W * scale)))
+    char_h_out = max(1, int(round(CHAR_H * scale)))
+    spacing_out = max(0, int(round(CHAR_SPACING * scale)))
+    advance = char_w_out + spacing_out
+    full_px_w = max(1, len(text) * advance - spacing_out)
+    px_w = min(full_px_w, max_led_px) if max_led_px else full_px_w
+    px_h = char_h_out
+
+    # Per-input-pixel output ranges (even distribution)
+    row_ranges = [((i * char_h_out) // CHAR_H, ((i + 1) * char_h_out) // CHAR_H)
+                  for i in range(CHAR_H)]
+    col_ranges = [((i * char_w_out) // CHAR_W, ((i + 1) * char_w_out) // CHAR_W)
+                  for i in range(CHAR_W)]
+
     buf = [[(0, 0, 0, 0)] * px_w for _ in range(px_h)]
     cx = 0
     for ch in text:
+        if cx >= px_w:
+            break
         rows = FONT_5X7.get(ch, FONT_5X7.get(' '))
         for ry, bits in enumerate(rows):
-            for bx in range(5):
-                if not (bits & (1 << (4 - bx))):
+            r_start, r_end = row_ranges[ry]
+            for bx in range(CHAR_W):
+                if not (bits & (1 << (CHAR_W - 1 - bx))):
                     continue
-                for dy in range(scale):
-                    for dx in range(scale):
-                        x = cx + bx * scale + dx
-                        y = ry * scale + dy
-                        if 0 <= x < px_w and 0 <= y < px_h:
-                            buf[y][x] = (color[0], color[1], color[2], 255)
-        cx += (CHAR_W + CHAR_SPACING) * scale
+                c_start, c_end = col_ranges[bx]
+                for dy in range(r_start, r_end):
+                    if not (0 <= dy < px_h):
+                        continue
+                    for dx in range(c_start, c_end):
+                        x = cx + dx
+                        if 0 <= x < px_w:
+                            buf[dy][x] = (color[0], color[1], color[2], 255)
+        cx += advance
 
     # Up-scale to screen pixels (grid_scale × per font pixel)
     img = QImage(px_w * grid_scale, px_h * grid_scale, QImage.Format.Format_ARGB32)
@@ -80,31 +97,17 @@ def _render_text_to_pixmap(text: str, color: tuple, scale: int,
     return QPixmap.fromImage(img)
 
 
-# Same plane glyph as the renderer — keep in sync
-_PLANE_GLYPH = [
-    "...X...",
-    "...X...",
-    "..XXX..",
-    "XXXXXXX",
-    "..XXX..",
-    "...X...",
-    ".XX.XX.",
-]
-
-
 def _render_progress_to_pixmap(block: LayoutBlock, grid_scale: int) -> QPixmap:
-    """Render a sample progress bar (50% progress) matching renderer semantics."""
+    """Render a sample progress bar (50%) matching renderer semantics."""
     w = max(4, block.width)
     h = max(1, block.height)
     img = QImage(w * grid_scale, h * grid_scale, QImage.Format.Format_ARGB32)
     img.fill(0)
-    color    = QColor(*block.color)
-    plane_qc = QColor(*(block.plane_color if block.plane_color is not None else block.color))
-    dim      = QColor(block.color[0] // 2, block.color[1] // 2, block.color[2] // 2)
+    color = QColor(*block.color)
+    dim   = QColor(block.color[0] // 2, block.color[1] // 2, block.color[2] // 2)
 
-    bar_block_h = 7 if block.show_plane else 3
-    bar_y = bar_block_h // 2
-    pos   = (w - 1) // 2  # 50 % for preview
+    bar_y = 1                # 3-pixel-tall bar area, bar at row 1
+    pos   = (w - 1) // 2     # sample at 50 % for preview
 
     def put(x, y, qc):
         if not (0 <= x < w and 0 <= y < h):
@@ -113,7 +116,7 @@ def _render_progress_to_pixmap(block: LayoutBlock, grid_scale: int) -> QPixmap:
             for dx in range(grid_scale):
                 img.setPixelColor(x * grid_scale + dx, y * grid_scale + dy, qc)
 
-    # Bar — dotted remaining (every 2nd pixel) matches renderer
+    # Bar
     if block.show_remaining:
         for i in range(w):
             if i <= pos:
@@ -124,23 +127,17 @@ def _render_progress_to_pixmap(block: LayoutBlock, grid_scale: int) -> QPixmap:
         for i in range(pos + 1):
             put(i, bar_y, color)
 
-    # Endpoints
+    # Endpoint dots
     if block.show_endpoints:
         for ex in (0, w - 1):
             for dy_ in (-1, 0):
                 for dx_ in (-1, 0, 1):
                     put(ex + dx_, bar_y + dy_, color)
 
-    # Marker / plane — put() already clips to [0, w) so no overflow
-    if block.show_plane:
-        for gy, row in enumerate(_PLANE_GLYPH):
-            for gx, ch in enumerate(row):
-                if ch == "X":
-                    put(pos + gx - 3, bar_y + gy - 3, plane_qc)
-    else:
-        for dx in (-1, 0, 1):
-            put(pos + dx, bar_y, plane_qc)
-        put(pos, bar_y - 1, plane_qc)
+    # Aircraft marker (3-wide pip + 1 tick above)
+    for dx in (-1, 0, 1):
+        put(pos + dx, bar_y, color)
+    put(pos, bar_y - 1, color)
 
     return QPixmap.fromImage(img)
 
@@ -193,7 +190,10 @@ class BlockItem(QGraphicsRectItem):
                 text = render_block_text(block, flight)
             except Exception:
                 text = block.effective_label + "----" + block.effective_unit
-        return _render_text_to_pixmap(text, block.color, block.font_scale, gs)
+        # Clip the preview pixmap to the block's allotted LED-pixel width so it
+        # mirrors what the LED renderer does (and never overflows the rectangle).
+        return _render_text_to_pixmap(text, block.color, block.font_scale, gs,
+                                       max_led_px=block.width)
 
     def mousePressEvent(self, event):
         if self._on_select:
@@ -257,15 +257,13 @@ class BlockRow(QWidget):
 
 class CustomizationPanel(QGroupBox):
     color_changed   = pyqtSignal(str, tuple)
-    font_changed    = pyqtSignal(str, int)
+    font_changed    = pyqtSignal(str, float)
     label_changed   = pyqtSignal(str, str)
     unit_changed    = pyqtSignal(str, str)
     fmt_changed     = pyqtSignal(str, str)
     width_changed   = pyqtSignal(str, int)
     show_remaining_changed = pyqtSignal(str, bool)
-    show_plane_changed     = pyqtSignal(str, bool)
     show_endpoints_changed = pyqtSignal(str, bool)
-    plane_color_changed    = pyqtSignal(str, tuple)
 
     def __init__(self, parent=None):
         super().__init__("Customize — (select a block)", parent)
@@ -295,11 +293,13 @@ class CustomizationPanel(QGroupBox):
 
         row1.addSpacing(8)
         row1.addWidget(QLabel("Font scale:"))
-        self.font_spin = QSpinBox()
-        self.font_spin.setRange(1, 10)
+        self.font_spin = QDoubleSpinBox()
+        self.font_spin.setRange(1.0, 5.0)
+        self.font_spin.setSingleStep(0.25)
+        self.font_spin.setDecimals(2)
         self.font_spin.setSuffix("×")
         self.font_spin.valueChanged.connect(
-            lambda v: self._emit(self.font_changed, int(v))
+            lambda v: self._emit(self.font_changed, float(v))
         )
         row1.addWidget(self.font_spin)
         row1.addStretch()
@@ -312,7 +312,9 @@ class CustomizationPanel(QGroupBox):
         self.label_edit = QLineEdit()
         self.label_edit.setPlaceholderText("(none)")
         self.label_edit.setMaximumWidth(140)
-        self.label_edit.editingFinished.connect(self._on_label)
+        # `textEdited` fires on every user keystroke (but not on programmatic
+        # setText), so the preview rectangle live-resizes as the user types.
+        self.label_edit.textEdited.connect(self._on_label_text)
         row2.addWidget(self.label_edit)
 
         self.unit_lbl = QLabel("Unit:")
@@ -320,7 +322,7 @@ class CustomizationPanel(QGroupBox):
         self.unit_edit = QLineEdit()
         self.unit_edit.setPlaceholderText("(none)")
         self.unit_edit.setMaximumWidth(80)
-        self.unit_edit.editingFinished.connect(self._on_unit)
+        self.unit_edit.textEdited.connect(self._on_unit_text)
         row2.addWidget(self.unit_edit)
         row2.addStretch()
         root.addLayout(row2)
@@ -342,18 +344,6 @@ class CustomizationPanel(QGroupBox):
             lambda v: self._emit(self.show_remaining_changed, bool(v))
         )
         prog.addWidget(self.cb_remaining)
-
-        self.cb_plane = QCheckBox("Plane marker")
-        self.cb_plane.toggled.connect(
-            lambda v: self._emit(self.show_plane_changed, bool(v))
-        )
-        prog.addWidget(self.cb_plane)
-
-        self.plane_color_btn = QPushButton()
-        self.plane_color_btn.setFixedSize(22, 18)
-        self.plane_color_btn.setToolTip("Plane glyph color")
-        self.plane_color_btn.clicked.connect(self._pick_plane_color)
-        prog.addWidget(self.plane_color_btn)
 
         self.cb_endpoints = QCheckBox("Endpoint dots")
         self.cb_endpoints.toggled.connect(
@@ -395,7 +385,7 @@ class CustomizationPanel(QGroupBox):
                     break
 
             self._set_swatch(block.color)
-            self.font_spin.setValue(block.font_scale)
+            self.font_spin.setValue(float(block.font_scale))
 
             # Show label/unit fields only for blocks that render text
             has_label = block.has_label
@@ -413,11 +403,7 @@ class CustomizationPanel(QGroupBox):
             if is_prog:
                 self.width_spin.setValue(block.custom_width or block.width)
                 self.cb_remaining.setChecked(block.show_remaining)
-                self.cb_plane.setChecked(block.show_plane)
                 self.cb_endpoints.setChecked(block.show_endpoints)
-                # Plane color swatch — defaults to the bar color when unset
-                pc = block.plane_color if block.plane_color is not None else block.color
-                self._set_plane_swatch(pc)
                 self.font_spin.setEnabled(False)
             else:
                 self.font_spin.setEnabled(True)
@@ -441,34 +427,16 @@ class CustomizationPanel(QGroupBox):
             self._set_swatch(rgb)
             self.color_changed.emit(self._block.key, rgb)
 
-    def _set_plane_swatch(self, rgb: tuple):
-        r, g, b = rgb
-        self.plane_color_btn.setStyleSheet(
-            f"background-color: rgb({r},{g},{b}); border: 1px solid #555;"
-        )
-
-    def _pick_plane_color(self):
-        if self._block is None:
-            return
-        current = (self._block.plane_color
-                   if self._block.plane_color is not None
-                   else self._block.color)
-        c = QColorDialog.getColor(QColor(*current), self, "Plane color")
-        if c.isValid():
-            rgb = (c.red(), c.green(), c.blue())
-            self._set_plane_swatch(rgb)
-            self.plane_color_changed.emit(self._block.key, rgb)
-
     def _on_fmt(self, _idx: int):
         fid = self.fmt.currentData()
         if fid:
             self._emit(self.fmt_changed, fid)
 
-    def _on_label(self):
-        self._emit(self.label_changed, self.label_edit.text())
+    def _on_label_text(self, text: str):
+        self._emit(self.label_changed, text)
 
-    def _on_unit(self):
-        self._emit(self.unit_changed, self.unit_edit.text())
+    def _on_unit_text(self, text: str):
+        self._emit(self.unit_changed, text)
 
 
 # ── Main editor widget ────────────────────────────────────────────────────────
@@ -561,9 +529,7 @@ class LayoutEditorWidget(QWidget):
         self._custom.fmt_changed.connect(self._on_format)
         self._custom.width_changed.connect(self._on_width)
         self._custom.show_remaining_changed.connect(self._on_show_remaining)
-        self._custom.show_plane_changed.connect(self._on_show_plane)
         self._custom.show_endpoints_changed.connect(self._on_show_endpoints)
-        self._custom.plane_color_changed.connect(self._on_plane_color)
         right.addWidget(self._custom)
 
         right_container = QWidget()
@@ -626,6 +592,12 @@ class LayoutEditorWidget(QWidget):
         self._items.clear()
         for block in self._blocks:
             if block.enabled:
+                # Clamp positions to fit the panel before placing the item.
+                # Keeps save/load consistent: a saved position is always one
+                # that the editor actually uses, so a round-trip never moves
+                # the block.
+                block.x = max(0, min(block.x, max(0, self._W - block.width)))
+                block.y = max(0, min(block.y, max(0, self._H - block.height)))
                 item = BlockItem(block, self._flight, self._GS, self._PW, self._PH,
                                  self._on_select)
                 self._scene.addItem(item)
@@ -683,10 +655,10 @@ class LayoutEditorWidget(QWidget):
         self._rebuild_item(block)
         self._emit()
 
-    def _on_font(self, key: str, scale: int):
+    def _on_font(self, key: str, scale: float):
         block = next((b for b in self._blocks if b.key == key), None)
         if block is None: return
-        block.font_scale = max(1, int(scale))
+        block.font_scale = max(1.0, float(scale))
         self._rebuild_item(block)
         self._emit()
 
@@ -731,24 +703,10 @@ class LayoutEditorWidget(QWidget):
         self._rebuild_item(b)
         self._emit()
 
-    def _on_show_plane(self, key: str, v: bool):
-        b = next((b for b in self._blocks if b.key == key), None)
-        if b is None: return
-        b.show_plane = v
-        self._rebuild_item(b)
-        self._emit()
-
     def _on_show_endpoints(self, key: str, v: bool):
         b = next((b for b in self._blocks if b.key == key), None)
         if b is None: return
         b.show_endpoints = v
-        self._rebuild_item(b)
-        self._emit()
-
-    def _on_plane_color(self, key: str, rgb: tuple):
-        b = next((b for b in self._blocks if b.key == key), None)
-        if b is None: return
-        b.plane_color = rgb
         self._rebuild_item(b)
         self._emit()
 

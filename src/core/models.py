@@ -54,8 +54,10 @@ class Flight:
     airline_iata: str = ""
     airline_icao: str = ""
     aircraft_type: str = ""
-    origin: str = ""
-    destination: str = ""
+    origin: str = ""           # IATA code, e.g. "ORD"
+    destination: str = ""      # IATA code, e.g. "LAX"
+    origin_icao: str = ""      # ICAO code, e.g. "KORD"
+    destination_icao: str = "" # ICAO code, e.g. "KLAX"
 
     @property
     def display_callsign(self) -> str:
@@ -99,8 +101,9 @@ BLOCK_FORMATS: dict[str, list[FormatSpec]] = {
         FormatSpec("icao",  "RYR  (ICAO code)",      3, "", ""),
     ],
     "callsign": [
-        FormatSpec("full",   "RYR234  (callsign)",   6, "", ""),
-        FormatSpec("icao24", "3C6444  (ICAO24 hex)", 6, "", ""),
+        # ICAO Mode-S aircraft ID is up to 8 chars (e.g. "BCS75515", "RYR27JN")
+        FormatSpec("full",   "RYR27JN  (callsign)",   8, "", ""),
+        FormatSpec("icao24", "3C6444  (ICAO24 hex)",  6, "", ""),
     ],
     "route": [
         FormatSpec("iata",  "ORD-LAX  (IATA)",   7, "", ""),
@@ -110,8 +113,8 @@ BLOCK_FORMATS: dict[str, list[FormatSpec]] = {
         FormatSpec("arr",   "LAX  (arrival)",    3, "", ""),
     ],
     "aircraft_type": [
-        FormatSpec("code", "B738  (ICAO code)",      4, "", ""),
-        FormatSpec("full", "B737-800  (full model)", 8, "", ""),
+        FormatSpec("code", "B738  (ICAO code)",            4,  "", ""),
+        FormatSpec("full", "Boeing 737-800  (full name)", 15,  "", ""),
     ],
     "altitude": [
         FormatSpec("ft_full",    "36000  (ft)",        5, "A:", "ft"),
@@ -217,7 +220,7 @@ class LayoutBlock:
     custom_width: int | None = None       # progress: user-defined pixel width
     custom_label: str | None = None       # None → use format's default_label
     custom_unit: str | None = None        # None → use format's default_unit
-    font_scale: int = 1                   # integer, 1 .. 10
+    font_scale: float = 1.0               # 1.0 .. 5.0 in 0.25 steps
     # Progress-bar embellishments
     show_remaining: bool = False
     show_plane: bool = False
@@ -227,8 +230,8 @@ class LayoutBlock:
     def __post_init__(self):
         if not self.fmt:
             self.fmt = BLOCK_DEFAULT_FORMAT.get(self.key, "")
-        if self.font_scale < 1:
-            self.font_scale = 1
+        if self.font_scale < 1.0:
+            self.font_scale = 1.0
 
     # ── label/unit resolution ─────────────────────────────────────────────────
 
@@ -272,20 +275,19 @@ class LayoutBlock:
             return _LOGO_SIZES.get(self.fmt, 24)
         if self.key == "progress":
             return max(4, int(self.custom_width)) if self.custom_width else 40
-        # Text block: width = chars × char_width × scale (sans trailing spacing)
         n = max(1, self.text_char_count)
-        return (n * (CHAR_W + CHAR_SPACING) - CHAR_SPACING) * self.font_scale
+        char_w_scaled = max(1, int(round(CHAR_W * self.font_scale)))
+        spacing_scaled = max(0, int(round(CHAR_SPACING * self.font_scale)))
+        return n * (char_w_scaled + spacing_scaled) - spacing_scaled
 
     @property
     def height(self) -> int:
         if self.key == "logo":
             return _LOGO_SIZES.get(self.fmt, 24)
         if self.key == "progress":
-            # Vertical space the plane glyph + bar need
-            bar_block = 7 if self.show_plane else 3
             text_block = (CHAR_H + 2) if self.show_remaining else 0
-            return bar_block + text_block
-        return CHAR_H * self.font_scale
+            return 3 + text_block
+        return max(1, int(round(CHAR_H * self.font_scale)))
 
     @property
     def color(self) -> tuple:
@@ -376,14 +378,29 @@ def value_distance(km: float, fmt_id: str) -> str:
 
 
 def value_route(flight, fmt_id: str) -> str:
-    o = flight.origin or "???"
-    d = flight.destination or "???"
-    if not flight.origin and not flight.destination:
-        return flight.origin_country[:7].upper() if flight.origin_country else ""
-    if fmt_id == "icao":  return f"{o}-{d}"
-    if fmt_id == "arrow": return f"{o}>{d}"
-    if fmt_id == "dep":   return o
-    if fmt_id == "arr":   return d
+    """Render route per format. ICAO formats use ICAO codes when available,
+    IATA formats use IATA codes. Falls back to the other form if one is missing.
+    Returns "???" placeholders rather than substituting unrelated data."""
+    iata_o = (flight.origin or "").strip()
+    iata_d = (flight.destination or "").strip()
+    icao_o = (flight.origin_icao or "").strip()
+    icao_d = (flight.destination_icao or "").strip()
+
+    if fmt_id == "icao":
+        o = icao_o or iata_o or "????"
+        d = icao_d or iata_d or "????"
+        return f"{o}-{d}"
+    if fmt_id == "arrow":
+        o = iata_o or icao_o or "???"
+        d = iata_d or icao_d or "???"
+        return f"{o}>{d}"
+    if fmt_id == "dep":
+        return iata_o or icao_o or "???"
+    if fmt_id == "arr":
+        return iata_d or icao_d or "???"
+    # default: iata
+    o = iata_o or icao_o or "???"
+    d = iata_d or icao_d or "???"
     return f"{o}-{d}"
 
 
@@ -401,8 +418,15 @@ def value_callsign(flight, fmt_id: str) -> str:
 
 
 def value_aircraft_type(flight, fmt_id: str) -> str:
-    typ = flight.aircraft_type or "----"
-    return typ.upper() if fmt_id == "full" else typ[:4].upper()
+    typ = (flight.aircraft_type or "").strip()
+    if not typ:
+        return "----"
+    if fmt_id == "full":
+        # Lookup table src/core/aircraft_types.py maps ICAO codes → model names.
+        from src.core.aircraft_types import lookup_type
+        full = lookup_type(typ)
+        return (full or typ).upper()
+    return typ[:4].upper()
 
 
 def value_squawk(flight, _fmt_id: str) -> str:
@@ -413,8 +437,18 @@ def value_country(flight, _fmt_id: str) -> str:
     return (flight.origin_country or "").upper()
 
 
+def _is_placeholder(value: str) -> bool:
+    """A value is a 'no data' placeholder if it's empty or consists solely of
+    dashes / question marks (the conventions our value_* helpers use)."""
+    if not value:
+        return True
+    return all(c in "-?" for c in value.strip())
+
+
 def render_block_text(block: LayoutBlock, flight: Flight) -> str:
-    """Compose the final rendered string for a text block: label + value + unit."""
+    """Compose the final rendered string for a text block: label + value + unit.
+    When the value is a placeholder (no data), render just the placeholder —
+    no label, no unit. Avoids ugly "A:---kft" / "S:---mph" output."""
     key = block.key
     fmt = block.fmt
     if key == "altitude":      v = value_altitude(flight.baro_altitude, fmt)
@@ -430,6 +464,11 @@ def render_block_text(block: LayoutBlock, flight: Flight) -> str:
     elif key == "country":     v = value_country(flight, fmt)
     else:
         v = ""
+
+    if _is_placeholder(v):
+        # No valid data — render only the user-set label (often empty by default);
+        # never a "---" / "???" placeholder, never the unit.
+        return block.effective_label
     return f"{block.effective_label}{v}{block.effective_unit}"
 
 

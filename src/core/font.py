@@ -106,49 +106,80 @@ CHAR_SPACING = 1  # pixels between characters
 LINE_SPACING = 1  # pixels between lines
 
 
-def char_width(scale: int = 1) -> int:
-    return (CHAR_W + CHAR_SPACING) * scale
+def _scaled_dim(n: int, scale: float) -> int:
+    """Output-pixel dimension for an n-font-pixel input at given scale."""
+    return max(1, int(round(n * scale)))
 
 
-def text_width(text: str, scale: int = 1) -> int:
-    return (len(text) * (CHAR_W + CHAR_SPACING) - CHAR_SPACING) * scale
+def _split_ranges(n_in: int, n_out: int) -> list[tuple[int, int]]:
+    """Distribute n_in input pixels across n_out output pixels evenly.
+    Returns a list of (start, end) ranges, one per input pixel."""
+    return [((i * n_out) // n_in, ((i + 1) * n_out) // n_in)
+            for i in range(n_in)]
+
+
+def char_width(scale: float = 1.0) -> int:
+    """Width in output pixels for one char including its trailing spacer."""
+    return _scaled_dim(CHAR_W, scale) + max(0, int(round(CHAR_SPACING * scale)))
+
+
+def text_width(text: str, scale: float = 1.0) -> int:
+    """Width in output pixels for `text` (no trailing spacer)."""
+    if not text:
+        return 0
+    cw = _scaled_dim(CHAR_W, scale)
+    sp = max(0, int(round(CHAR_SPACING * scale)))
+    return len(text) * (cw + sp) - sp
 
 
 def draw_char(pixels, x: int, y: int, char: str,
               color: tuple, w: int, h: int,
-              clip_x: int, scale: int = 1) -> None:
-    """Draw one character at integer pixel scale. clip_x is exclusive right edge."""
+              clip_x: int,
+              row_ranges: list[tuple[int, int]],
+              col_ranges: list[tuple[int, int]]) -> None:
+    """Draw one character using pre-computed pixel-distribution ranges."""
     rows = FONT_5X7.get(char, FONT_5X7.get(' '))
     for ry, bits in enumerate(rows):
-        for bx in range(5):
-            if not (bits & (1 << (4 - bx))):
+        r_start, r_end = row_ranges[ry]
+        for bx in range(CHAR_W):
+            if not (bits & (1 << (CHAR_W - 1 - bx))):
                 continue
-            # Paint a scale×scale block per font pixel
-            for dy in range(scale):
-                py = y + ry * scale + dy
+            c_start, c_end = col_ranges[bx]
+            for dy in range(r_start, r_end):
+                py = y + dy
                 if py < 0 or py >= h:
                     continue
-                for dx in range(scale):
-                    px = x + bx * scale + dx
+                for dx in range(c_start, c_end):
+                    px = x + dx
                     if 0 <= px < w and px < clip_x:
                         pixels[py][px] = color
 
 
 def draw_text(pixels, x: int, y: int, text: str,
               color: tuple, w: int | None = None, h: int | None = None,
-              max_width: int = 0, scale: int = 1) -> int:
-    """Draw text left-to-right at integer scale (1, 2, 3 ...).
-    w/h default to buffer dimensions when None."""
+              max_width: int = 0, scale: float = 1.0) -> int:
+    """Draw text left-to-right at any (integer or fractional) scale.
+    Fractional scaling distributes input pixels across output pixels evenly,
+    so glyphs stay legible at e.g. 1.25× / 1.5× / 1.75×."""
     if h is None:
         h = len(pixels)
     if w is None:
         w = len(pixels[0]) if h else 0
+
+    char_w_out = _scaled_dim(CHAR_W, scale)
+    char_h_out = _scaled_dim(CHAR_H, scale)
+    spacing_out = max(0, int(round(CHAR_SPACING * scale)))
+    advance = char_w_out + spacing_out
+
+    row_ranges = _split_ranges(CHAR_H, char_h_out)
+    col_ranges = _split_ranges(CHAR_W, char_w_out)
+
     clip_x = (x + max_width) if max_width > 0 else w
-    cw = (CHAR_W + CHAR_SPACING) * scale
     cx = x
     for ch in text:
         if cx >= clip_x:
             break
-        draw_char(pixels, cx, y, ch, color, w, h, clip_x, scale)
-        cx += cw
+        draw_char(pixels, cx, y, ch, color, w, h, clip_x,
+                  row_ranges, col_ranges)
+        cx += advance
     return cx
