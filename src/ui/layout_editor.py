@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGraphicsScene, QGraphicsView,
     QGraphicsRectItem, QGraphicsPixmapItem, QLabel, QPushButton,
     QScrollArea, QCheckBox, QComboBox, QFrame, QSpinBox, QDoubleSpinBox,
-    QColorDialog, QLineEdit, QGroupBox, QGraphicsItem,
+    QColorDialog, QLineEdit, QGroupBox, QGraphicsItem, QAbstractScrollArea,
 )
 from PyQt6.QtCore import Qt, QPointF, pyqtSignal
 from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPixmap, QImage
@@ -25,6 +25,23 @@ from src.core.font import (
 
 MAX_CANVAS_W = 880
 MAX_CANVAS_H = 460
+
+
+class _CanvasView(QGraphicsView):
+    """QGraphicsView subclass that reliably notifies the editor on mouse release.
+
+    Monkey-patching QGraphicsView.mouseReleaseEvent on an instance does NOT
+    work in PyQt6 — Qt's C++ vtable dispatch bypasses Python instance attrs.
+    A proper subclass override is the only reliable way.
+    """
+
+    def __init__(self, scene: QGraphicsScene, on_release):
+        super().__init__(scene)
+        self._on_release = on_release
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        self._on_release()
 
 
 def _grid_scale_for(W: int, H: int) -> int:
@@ -103,10 +120,10 @@ def _render_progress_to_pixmap(block: LayoutBlock, grid_scale: int) -> QPixmap:
     h = max(1, block.height)
     img = QImage(w * grid_scale, h * grid_scale, QImage.Format.Format_ARGB32)
     img.fill(0)
-    color = QColor(*block.color)
-    dim   = QColor(block.color[0] // 2, block.color[1] // 2, block.color[2] // 2)
+    color        = QColor(*block.color)
+    remaining_qc = QColor(52, 52, 52)   # faint white — matches renderer
 
-    bar_y = 1                # 3-pixel-tall bar area, bar at row 1
+    bar_y = 1                # 3-pixel-tall bar area, bar sits at row 1
     pos   = (w - 1) // 2     # sample at 50 % for preview
 
     def put(x, y, qc):
@@ -116,13 +133,13 @@ def _render_progress_to_pixmap(block: LayoutBlock, grid_scale: int) -> QPixmap:
             for dx in range(grid_scale):
                 img.setPixelColor(x * grid_scale + dx, y * grid_scale + dy, qc)
 
-    # Bar
+    # Bar — dotted faint trail for remaining distance, solid for completed
     if block.show_remaining:
         for i in range(w):
             if i <= pos:
                 put(i, bar_y, color)
             elif i % 2 == 0:
-                put(i, bar_y, dim)
+                put(i, bar_y, remaining_qc)
     else:
         for i in range(pos + 1):
             put(i, bar_y, color)
@@ -611,13 +628,12 @@ class LayoutEditorWidget(QWidget):
 
         self._scene = QGraphicsScene(0, 0, self._PW, self._PH)
         self._draw_grid()
-        self._view = QGraphicsView(self._scene)
+        self._view = _CanvasView(self._scene, self._emit)
         self._view.setBackgroundBrush(QBrush(QColor(12, 12, 12)))
         self._view.setFrameShape(QGraphicsView.Shape.Box)
         self._view.setFixedSize(self._PW + 4, self._PH + 4)
         self._view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._view.mouseReleaseEvent = self._view_mouse_release
         self._canvas_layout.addWidget(self._view)
 
     def _draw_grid(self):
@@ -808,10 +824,6 @@ class LayoutEditorWidget(QWidget):
         self._selected_key = None
         self._custom.show_block(None)
         self._populate()
-        self._emit()
-
-    def _view_mouse_release(self, event):
-        QGraphicsView.mouseReleaseEvent(self._view, event)
         self._emit()
 
     def _sync_positions(self):

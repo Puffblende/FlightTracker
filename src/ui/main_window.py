@@ -25,6 +25,7 @@ from src.core.presets import (
     list_presets, save_preset, load_preset, delete_preset,
     get_last_preset, set_last_preset,
     build_preset_data, layout_from_preset,
+    save_autosave, load_autosave,
 )
 from src.ui.led_widget import LEDWidget
 from src.ui.settings_panel import SettingsPanel, CUSTOM_ITEM
@@ -82,12 +83,16 @@ class MainWindow(QMainWindow):
         sc = QShortcut(QKeySequence.StandardKey.Save, self)
         sc.activated.connect(self._save_preset)
 
-        # Load last used preset, or fall back to auto-detecting location
+        # Load last used preset → autosave → fresh location detect
         last = get_last_preset()
         if last and load_preset(last) is not None:
             self._load_preset_by_name(last)
         else:
-            self._fetch_location()
+            saved = load_autosave()
+            if saved is not None:
+                self._apply_preset_data(saved, name=None)
+            else:
+                self._fetch_location()
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -121,63 +126,78 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._sb_status)
 
     def _build_preset_bar(self) -> QWidget:
+        from src.ui.theme import accent_button, danger_button
+        from PyQt6.QtWidgets import QSizePolicy as SP, QMenu
+        from PyQt6.QtGui import QAction
+
         bar = QWidget()
         bar.setObjectName("presetBar")
-        # Scope the dark background to *this* bar by name, so it doesn't
-        # cascade into the combobox's dropdown and break the selection
-        # highlight on Windows.
         bar.setStyleSheet(
-            "QWidget#presetBar { background: #1e1e1e; border-bottom: 1px solid #3a3a3a; }"
-            "QWidget#presetBar > QLabel { background: transparent; }"
-            "QComboBox QAbstractItemView { "
-            "  background: #232323; color: #dcdcdc; "
-            "  selection-background-color: #2a82da; "
-            "  selection-color: #ffffff; "
-            "  outline: 0; "
-            "}"
+            "QWidget#presetBar { background:#111111; border-bottom:1px solid #1e1e1e; }"
+            "QWidget#presetBar > QLabel { background:transparent; color:#555; font-size:11px; }"
         )
-        bar.setFixedHeight(36)
+        bar.setFixedHeight(44)
 
         h = QHBoxLayout(bar)
-        h.setContentsMargins(10, 4, 10, 4)
+        h.setContentsMargins(12, 6, 12, 6)
         h.setSpacing(6)
 
-        h.addWidget(QLabel("Preset:"))
+        # "Preset" label
+        lbl = QLabel("Preset")
+        lbl.setSizePolicy(SP.Policy.Fixed, SP.Policy.Fixed)
+        h.addWidget(lbl)
 
+        # Combo — takes all spare horizontal space
         self._preset_combo = QComboBox()
-        self._preset_combo.setMinimumWidth(170)
+        self._preset_combo.setMinimumWidth(100)
+        self._preset_combo.setSizePolicy(SP.Policy.Expanding, SP.Policy.Fixed)
         self._preset_combo.setToolTip("Select a preset to load it")
         self._preset_combo.currentIndexChanged.connect(self._on_preset_combo_changed)
         h.addWidget(self._preset_combo)
 
+        h.addSpacing(4)
+
+        # Save (primary action, always visible)
         self._btn_save = QPushButton("Save")
-        self._btn_save.setToolTip("Save changes to the current preset")
+        self._btn_save.setToolTip("Save changes  (⌘S / Ctrl+S)")
         self._btn_save.setEnabled(False)
+        self._btn_save.setSizePolicy(SP.Policy.Fixed, SP.Policy.Fixed)
+        self._btn_save.setFixedWidth(58)
         self._btn_save.clicked.connect(self._save_preset)
+        accent_button(self._btn_save)
         h.addWidget(self._btn_save)
 
-        btn_save_as = QPushButton("Save As…")
-        btn_save_as.setToolTip("Save as a new preset name")
-        btn_save_as.clicked.connect(self._save_as_preset)
-        h.addWidget(btn_save_as)
+        # ⋯ menu — secondary preset actions collapsed to save space
+        self._btn_more = QPushButton("⋯")
+        self._btn_more.setToolTip("More preset actions")
+        self._btn_more.setFixedWidth(34)
+        self._btn_more.setSizePolicy(SP.Policy.Fixed, SP.Policy.Fixed)
+        h.addWidget(self._btn_more)
 
-        btn_new = QPushButton("New")
-        btn_new.setToolTip("Reset to defaults (unsaved)")
-        btn_new.clicked.connect(self._new_preset)
-        h.addWidget(btn_new)
+        more_menu = QMenu(self._btn_more)
+        self._act_save_as = QAction("Save As…", self)
+        self._act_save_as.triggered.connect(self._save_as_preset)
+        more_menu.addAction(self._act_save_as)
 
-        self._btn_delete = QPushButton("Delete")
-        self._btn_delete.setToolTip("Delete the currently selected preset")
-        self._btn_delete.setEnabled(False)
-        self._btn_delete.clicked.connect(self._delete_current_preset)
-        h.addWidget(self._btn_delete)
+        self._act_new = QAction("New Preset", self)
+        self._act_new.triggered.connect(self._new_preset)
+        more_menu.addAction(self._act_new)
 
-        h.addStretch()
+        more_menu.addSeparator()
+        self._act_delete = QAction("Delete Preset", self)
+        self._act_delete.setEnabled(False)
+        self._act_delete.triggered.connect(self._delete_current_preset)
+        more_menu.addAction(self._act_delete)
 
-        self._btn_overlay = QPushButton("⧉  Launch Overlay")
-        self._btn_overlay.setToolTip(
-            "Open a borderless always-on-top window showing the LED panel"
-        )
+        self._btn_more.setMenu(more_menu)
+
+        h.addStretch(1)
+
+        # Overlay toggle (right side)
+        self._btn_overlay = QPushButton("⧉ Overlay")
+        self._btn_overlay.setToolTip("Launch borderless always-on-top LED panel")
+        self._btn_overlay.setFixedWidth(88)
+        self._btn_overlay.setSizePolicy(SP.Policy.Fixed, SP.Policy.Fixed)
         self._btn_overlay.clicked.connect(self._toggle_overlay)
         h.addWidget(self._btn_overlay)
 
@@ -209,48 +229,85 @@ class MainWindow(QMainWindow):
 
         root.addWidget(self._settings)
 
-        # Right: LED display + controls
+        # Right: LED display card + controls
         right = QVBoxLayout()
-        right.setSpacing(8)
+        right.setSpacing(0)
+        right.setContentsMargins(0, 0, 0, 0)
 
-        header = QHBoxLayout()
-        self.lbl_showing = QLabel("Showing: —")
-        self.lbl_showing.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
-        header.addWidget(self.lbl_showing)
-        header.addStretch()
-        right.addLayout(header)
+        # ── Flight info strip ──────────────────────────────────────────
+        info_strip = QWidget()
+        info_strip.setStyleSheet(
+            "background:#131313; border-bottom:1px solid #1e1e1e;"
+        )
+        info_row = QHBoxLayout(info_strip)
+        info_row.setContentsMargins(16, 8, 16, 8)
+        self.lbl_showing = QLabel("No signal")
+        self.lbl_showing.setStyleSheet(
+            "font-family:'Courier New'; font-size:12px; font-weight:bold;"
+            "color:#5a5a5a; background:transparent;"
+        )
+        info_row.addWidget(self.lbl_showing)
+        info_row.addStretch()
+        self.lbl_info = QLabel("")
+        self.lbl_info.setStyleSheet(
+            "font-family:'Courier New'; font-size:10px; color:#484848;"
+            "background:transparent;"
+        )
+        info_row.addWidget(self.lbl_info)
+        right.addWidget(info_strip)
 
+        # ── LED card ───────────────────────────────────────────────────
+        led_card = QWidget()
+        led_card.setStyleSheet("background:#282828;")
+        led_layout = QVBoxLayout(led_card)
+        led_layout.setContentsMargins(24, 24, 24, 24)
         self._led = LEDWidget()
-        led_container = QHBoxLayout()
-        led_container.addStretch()
-        led_container.addWidget(self._led)
-        led_container.addStretch()
-        right.addLayout(led_container)
+        inner = QHBoxLayout()
+        inner.addStretch()
+        inner.addWidget(self._led)
+        inner.addStretch()
+        led_layout.addStretch()
+        led_layout.addLayout(inner)
+        led_layout.addStretch()
+        right.addWidget(led_card, 1)
 
-        nav = QHBoxLayout()
-        nav.setSpacing(6)
-        btn_prev = QPushButton("◀ Prev")
+        # ── Navigation bar ─────────────────────────────────────────────
+        nav_bar = QWidget()
+        nav_bar.setStyleSheet(
+            "background:#111111; border-top:1px solid #1e1e1e;"
+        )
+        nav_row = QHBoxLayout(nav_bar)
+        nav_row.setContentsMargins(14, 8, 14, 8)
+        nav_row.setSpacing(8)
+
+        btn_prev = QPushButton("◀")
+        btn_prev.setFixedWidth(40)
+        btn_prev.setToolTip("Previous flight")
         btn_prev.clicked.connect(self._prev_flight)
-        btn_next = QPushButton("Next ▶")
+
+        btn_next = QPushButton("▶")
+        btn_next.setFixedWidth(40)
+        btn_next.setToolTip("Next flight")
         btn_next.clicked.connect(self._next_flight)
-        self.btn_cycle = QPushButton("⏸ Pause Cycle")
+
+        self.btn_cycle = QPushButton("⏸  Pause")
         self.btn_cycle.setCheckable(True)
+        self.btn_cycle.setFixedWidth(90)
         self.btn_cycle.clicked.connect(self._toggle_cycle)
-        btn_refresh = QPushButton("⟳ Fetch Now")
+
+        btn_refresh = QPushButton("⟳  Fetch")
+        btn_refresh.setFixedWidth(80)
+        btn_refresh.setToolTip("Fetch flights now")
         btn_refresh.clicked.connect(self._fetch_flights_async)
-        nav.addWidget(btn_prev)
-        nav.addWidget(btn_next)
-        nav.addWidget(self.btn_cycle)
-        nav.addStretch()
-        nav.addWidget(btn_refresh)
-        right.addLayout(nav)
 
-        self.lbl_info = QLabel("No data yet.")
-        self.lbl_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        right.addWidget(self.lbl_info)
-        right.addStretch()
+        nav_row.addWidget(btn_prev)
+        nav_row.addWidget(btn_next)
+        nav_row.addWidget(self.btn_cycle)
+        nav_row.addStretch()
+        nav_row.addWidget(btn_refresh)
+        right.addWidget(nav_bar)
 
-        root.addLayout(right)
+        root.addLayout(right, 1)
         return page
 
     def _build_editor_tab(self):
@@ -300,10 +357,16 @@ class MainWindow(QMainWindow):
         self._cycle_timer.timeout.connect(self._next_flight)
         self._cycle_timer.start()
 
-        # Emergency flash: toggles on/off every 500 ms while active.
+        # Emergency flash
         self._flash_timer = QTimer(self)
         self._flash_timer.setInterval(500)
         self._flash_timer.timeout.connect(self._on_flash_tick)
+
+        # Debounced autosave: fires 400 ms after the last change
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.setInterval(400)
+        self._autosave_timer.timeout.connect(self._write_autosave)
 
     # ── Preset management ─────────────────────────────────────────────────────
 
@@ -319,6 +382,40 @@ class MainWindow(QMainWindow):
             self._dirty = True
             self._btn_save.setEnabled(self._current_preset is not None)
             self._update_title()
+        # Always (re)schedule the debounced write so every change lands on disk
+        self._autosave_timer.start()
+
+    def _write_autosave(self):
+        """Debounced write for settings changes (radius, timing, etc.)."""
+        if not self._loading_preset:
+            self._save_state()
+
+    def _save_state(self, layout_override: list | None = None):
+        """
+        Write current state to autosave and to the named preset (if any).
+        Uses self._layout directly — no roundtrip through the editor canvas.
+        """
+        try:
+            st     = self._settings.get_state()
+            layout = layout_override if layout_override is not None else self._layout
+            data   = build_preset_data(
+                name=self._current_preset or "_autosave",
+                layout=layout,
+                display_key=st["display_key"],
+                custom_grid=tuple(st["custom_grid"]),
+                custom_win=tuple(st["custom_win"]),
+                location=self._location,
+                radius=st["radius"],
+                fetch_interval=st["fetch_interval"],
+                cycle_interval=st["cycle_interval"],
+                opensky_user=st["opensky_user"],
+                opensky_pass=st["opensky_pass"],
+            )
+            save_autosave(data)
+            if self._current_preset:
+                save_preset(self._current_preset, data)
+        except Exception:
+            pass
 
     def _refresh_preset_combo(self):
         self._loading_preset = True
@@ -408,7 +505,7 @@ class MainWindow(QMainWindow):
         self._current_preset = name
         self._dirty = False
         self._btn_save.setEnabled(False)
-        self._btn_delete.setEnabled(True)
+        self._act_delete.setEnabled(True)
         self._refresh_preset_combo()
         self._update_title()
 
@@ -450,7 +547,7 @@ class MainWindow(QMainWindow):
             self._current_preset = None
             self._dirty = False
             self._btn_save.setEnabled(False)
-            self._btn_delete.setEnabled(False)
+            self._act_delete.setEnabled(False)
             self._refresh_preset_combo()
             self._update_title()
 
@@ -483,7 +580,7 @@ class MainWindow(QMainWindow):
             self._current_preset = None
             self._dirty = False
             self._btn_save.setEnabled(False)
-            self._btn_delete.setEnabled(False)
+            self._act_delete.setEnabled(False)
             self._refresh_preset_combo()
             self._update_title()
             self._redraw_led()
@@ -492,8 +589,11 @@ class MainWindow(QMainWindow):
 
     def _load_preset_by_name(self, name: str):
         data = load_preset(name)
-        if data is None:
-            return
+        if data is not None:
+            self._apply_preset_data(data, name=name)
+
+    def _apply_preset_data(self, data: dict, name: str | None):
+        """Apply a preset dict. name=None means autosave / anonymous restore."""
         self._loading_preset = True
         try:
             disp = data.get("display", {})
@@ -501,13 +601,11 @@ class MainWindow(QMainWindow):
             cg   = tuple(disp.get("custom_grid", [80, 40]))
             cw   = tuple(disp.get("custom_win",  [0,  0]))
 
-            # Apply display size to global state
             if key == CUSTOM_ITEM[0] or key == CUSTOM_KEY:
                 set_custom_display(cg[0], cg[1], cw[0], cw[1])
             else:
                 set_display_size(key)
 
-            # Restore settings panel (no signals)
             self._settings.restore_state({
                 "display_key":    key,
                 "custom_grid":    list(cg),
@@ -519,25 +617,21 @@ class MainWindow(QMainWindow):
                 "opensky_pass":   data.get("opensky_pass", ""),
             })
 
-            # Apply timer intervals and credentials
             self._fetch_timer.setInterval(data.get("fetch_interval", 15) * 1000)
             self._cycle_timer.setInterval(data.get("cycle_interval", 5) * 1000)
             self._os_user = data.get("opensky_user", "")
             self._os_pass = data.get("opensky_pass", "")
 
-            # Restore layout (no emit)
             blocks = layout_from_preset(data)
             self._layout = blocks
             self._led.apply_display_size()
             self._editor.set_layout(blocks)
-            self._editor.apply_display_size()   # clamps positions, emits (suppressed)
+            self._editor.apply_display_size()
             self._layout = self._editor.get_layout()
 
-            # Restore overlay size if open
             if self._overlay and self._overlay.isVisible():
                 self._overlay.apply_display_size()
 
-            # Restore location if saved
             loc_data = data.get("location")
             if loc_data:
                 loc = Location(
@@ -553,14 +647,14 @@ class MainWindow(QMainWindow):
             self._current_preset = name
             self._dirty = False
             self._btn_save.setEnabled(False)
-            self._btn_delete.setEnabled(True)
+            self._act_delete.setEnabled(name is not None)
             self._refresh_preset_combo()
             self._update_title()
             self._redraw_led()
 
-            set_last_preset(name)
+            if name:
+                set_last_preset(name)
 
-            # If we got a location from the preset, trigger a fresh fetch
             if loc_data:
                 self._fetch_flights_async()
             else:
@@ -586,18 +680,16 @@ class MainWindow(QMainWindow):
     # ── Window close ──────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
-        if self._dirty:
-            if self._current_preset:
-                # Named preset active — auto-save silently so positions are never lost
-                self._save_preset_impl(self._current_preset)
-            else:
-                # No preset name yet — ask what to do
-                if not self._confirm_discard():
-                    event.ignore()
-                    return
+        # Always persist current state so nothing is ever lost on exit.
+        # Named preset is updated in place; autosave catches the unnamed case.
+        self._persist_on_close()
         if self._overlay:
             self._overlay.close()
         event.accept()
+
+    def _persist_on_close(self):
+        """Final save before the window closes — reuses _save_state."""
+        self._save_state()
 
     # ── Data fetching ─────────────────────────────────────────────────────────
 
@@ -725,6 +817,9 @@ class MainWindow(QMainWindow):
         self._layout = blocks
         self._redraw_led()
         self._mark_dirty()
+        # Immediate write so a crash or force-quit never loses layout changes
+        if not self._loading_preset:
+            self._save_state(blocks)
 
     def _on_display_size_changed(self, key: str):
         set_display_size(key)
@@ -746,40 +841,39 @@ class MainWindow(QMainWindow):
         idx = self._flight_list.row(item)
         if 0 <= idx < len(self._flights):
             self._current_idx = idx
-            self._update_display()
+            self._update_display(fade=True)
 
     # ── Display update ────────────────────────────────────────────────────────
 
-    def _update_display(self):
+    def _update_display(self, fade: bool = False):
         if not self._flights:
             self._led.set_buffer(render_frame(None, self._layout))
-            self.lbl_showing.setText("Showing: no flights")
-            self.lbl_info.setText("No aircraft in range.")
+            self.lbl_showing.setText("No signal")
+            self.lbl_info.setText("")
             return
 
         n = len(self._flights)
         self._current_idx %= n
         flight = self._flights[self._current_idx]
         self.lbl_showing.setText(
-            f"Showing: {flight.display_callsign}  [{self._current_idx + 1}/{n}]"
+            f"{flight.display_callsign}  ·  {self._current_idx + 1} / {n}"
         )
         alt  = fmt_altitude(flight.baro_altitude, "ft_compact")
         spd  = fmt_speed(flight.velocity, "mph_s")
         dist = fmt_distance(flight.distance_km, "km")
         self.lbl_info.setText(
-            f"{flight.airline_display}  ·  {alt}  ·  {spd}  ·  {dist} away"
+            f"{flight.airline_display}    {alt}    {spd}    {dist}"
         )
-        self._redraw_led()
+        self._redraw_led(fade=fade)
 
-    def _redraw_led(self):
+    def _redraw_led(self, fade: bool = False):
         flight = self._flights[self._current_idx] if self._flights else None
-        # During an emergency, alternate the squawk block on/off so it flashes.
         flash_squawk = True if not self._emergency_active else self._emergency_flash
-        border_on = self._emergency_active and self._emergency_flash
+        border_on    = self._emergency_active and self._emergency_flash
         buf = render_frame(flight, self._layout,
                            flash_squawk=flash_squawk,
                            emergency_border=border_on)
-        self._led.set_buffer(buf)
+        self._led.set_buffer(buf, fade=fade)
         if hasattr(self, "_editor"):
             self._editor.set_flight(flight)
         if self._overlay and self._overlay.isVisible():
@@ -857,12 +951,12 @@ class MainWindow(QMainWindow):
     def _prev_flight(self):
         if self._flights:
             self._current_idx = (self._current_idx - 1) % len(self._flights)
-            self._update_display()
+            self._update_display(fade=True)
 
     def _next_flight(self):
         if self._flights:
             self._current_idx = (self._current_idx + 1) % len(self._flights)
-            self._update_display()
+            self._update_display(fade=True)
 
     def _toggle_cycle(self, checked: bool):
         if checked:

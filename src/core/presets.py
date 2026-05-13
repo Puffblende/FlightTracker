@@ -6,12 +6,33 @@ from pathlib import Path
 from src.core.models import LayoutBlock, default_layout
 
 
-PRESETS_DIR = Path.home() / ".flighttracker" / "presets"
-_LAST_FILE   = Path.home() / ".flighttracker" / "last_preset.txt"
+PRESETS_DIR   = Path.home() / ".flighttracker" / "presets"
+_LAST_FILE    = Path.home() / ".flighttracker" / "last_preset.txt"
+AUTOSAVE_FILE = Path.home() / ".flighttracker" / "autosave.json"
 
 
 def _ensure() -> None:
     PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ── Autosave (always-on, no name required) ────────────────────────────────────
+
+def save_autosave(data: dict) -> None:
+    """Write current state to the autosave file unconditionally."""
+    AUTOSAVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(AUTOSAVE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def load_autosave() -> dict | None:
+    """Load the autosave file, or return None if it doesn't exist / is corrupt."""
+    if not AUTOSAVE_FILE.exists():
+        return None
+    try:
+        with open(AUTOSAVE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 # ── Serialisation ─────────────────────────────────────────────────────────────

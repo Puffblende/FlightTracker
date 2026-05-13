@@ -287,8 +287,7 @@ class LayoutBlock:
         if self.key == "logo":
             return _LOGO_SIZES.get(self.fmt, 24)
         if self.key == "progress":
-            text_block = (CHAR_H + 2) if self.show_remaining else 0
-            return 3 + text_block
+            return 3  # 3-pixel bar strip; remaining is visual-only (no text row)
         return max(1, int(round(CHAR_H * self.font_scale)))
 
     @property

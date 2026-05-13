@@ -1,8 +1,8 @@
 """LED matrix simulation widget.
 Renders an arbitrary W×H pixel buffer as a realistic LED panel."""
 from __future__ import annotations
-from PyQt6.QtWidgets import QWidget, QSizePolicy
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QWidget, QSizePolicy, QGraphicsOpacityEffect
+from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QPainter, QColor
 
 from src.core.displays import get_display_size, get_window_hint
@@ -24,17 +24,29 @@ class LEDWidget(QWidget):
         self._resize_to_panel()
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
+        # Opacity effect for fade-in animation
+        self._fx = QGraphicsOpacityEffect(self)
+        self._fx.setOpacity(1.0)
+        self.setGraphicsEffect(self._fx)
+        self._fade = QPropertyAnimation(self._fx, b"opacity", self)
+        self._fade.setDuration(180)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+
     # ── public API ────────────────────────────────────────────────────────────
 
-    def set_buffer(self, buf: list[list[tuple]]) -> None:
+    def set_buffer(self, buf: list[list[tuple]], fade: bool = False) -> None:
         self._buf = buf
-        # If buffer dimensions changed, rebuild geometry
         new_h = len(buf)
         new_w = len(buf[0]) if new_h else 0
         if new_w != self._W or new_h != self._H:
             self._W, self._H = new_w, new_h
             self._compute_cell()
             self._resize_to_panel()
+        if fade:
+            self._fade.stop()
+            self._fade.setStartValue(0.35)
+            self._fade.setEndValue(1.0)
+            self._fade.start()
         self.update()
 
     def apply_display_size(self) -> None:

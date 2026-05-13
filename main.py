@@ -18,38 +18,40 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPalette, QColor
 from src.ui.main_window import MainWindow
+from src.ui.theme import STYLESHEET
 
 
-def _dark_palette(app: QApplication) -> None:
+def _base_palette(app: QApplication) -> None:
+    """Minimal palette so Qt's internal fallbacks use dark colours."""
     app.setStyle("Fusion")
     p = QPalette()
-    p.setColor(QPalette.ColorRole.Window,          QColor(28,  28,  28))
-    p.setColor(QPalette.ColorRole.WindowText,      QColor(220, 220, 220))
-    p.setColor(QPalette.ColorRole.Base,            QColor(18,  18,  18))
-    p.setColor(QPalette.ColorRole.AlternateBase,   QColor(38,  38,  38))
-    p.setColor(QPalette.ColorRole.ToolTipBase,     QColor(255, 255, 220))
-    p.setColor(QPalette.ColorRole.ToolTipText,     QColor(0,   0,   0))
-    p.setColor(QPalette.ColorRole.Text,            QColor(220, 220, 220))
-    p.setColor(QPalette.ColorRole.Button,          QColor(48,  48,  48))
-    p.setColor(QPalette.ColorRole.ButtonText,      QColor(220, 220, 220))
-    p.setColor(QPalette.ColorRole.BrightText,      QColor(255, 100, 100))
-    p.setColor(QPalette.ColorRole.Link,            QColor(60,  140, 230))
-    p.setColor(QPalette.ColorRole.Highlight,       QColor(42,  130, 218))
-    p.setColor(QPalette.ColorRole.HighlightedText, QColor(0,   0,   0))
-    p.setColor(QPalette.ColorRole.Mid,             QColor(60,  60,  60))
-    p.setColor(QPalette.ColorRole.Dark,            QColor(35,  35,  35))
+    dark = QColor(13, 13, 13)
+    p.setColor(QPalette.ColorRole.Window,          dark)
+    p.setColor(QPalette.ColorRole.WindowText,      QColor(208, 208, 208))
+    p.setColor(QPalette.ColorRole.Base,            QColor(17,  17,  17))
+    p.setColor(QPalette.ColorRole.AlternateBase,   QColor(24,  24,  24))
+    p.setColor(QPalette.ColorRole.Text,            QColor(208, 208, 208))
+    p.setColor(QPalette.ColorRole.Button,          QColor(30,  30,  30))
+    p.setColor(QPalette.ColorRole.ButtonText,      QColor(208, 208, 208))
+    p.setColor(QPalette.ColorRole.Highlight,       QColor(56,  120, 208))
+    p.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+    p.setColor(QPalette.ColorRole.ToolTipBase,     QColor(28,  32,  48))
+    p.setColor(QPalette.ColorRole.ToolTipText,     QColor(200, 204, 220))
+    p.setColor(QPalette.ColorRole.Link,            QColor(72,  138, 224))
+    p.setColor(QPalette.ColorRole.Mid,             QColor(42,  42,  42))
+    p.setColor(QPalette.ColorRole.Dark,            QColor(22,  22,  22))
     app.setPalette(p)
 
 
 def main():
-    # PyQt6 enables high-DPI scaling by default; keep consistent rounding
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
 
     app = QApplication(sys.argv)
     app.setApplicationName("FlightTracker")
-    _dark_palette(app)
+    _base_palette(app)
+    app.setStyleSheet(STYLESHEET)
 
     window = MainWindow()
     window.show()

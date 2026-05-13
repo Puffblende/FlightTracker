@@ -44,21 +44,25 @@ def _draw_progress(buf, block: LayoutBlock, flight: Flight, W: int, H: int) -> N
     prog = flight_progress(flight)
     pos = int(round((width - 1) * max(0.0, min(1.0, prog)))) if prog is not None else None
 
+    # Faint white used for the remaining-distance dotted trail
+    _REMAINING = (52, 52, 52)
+
     # Bar
     if block.show_remaining:
-        dim = tuple(c // 2 for c in color)
         for i in range(width):
             bx = x0 + i
             if not (0 <= bx < W and 0 <= bar_y < H):
                 continue
             if pos is None:
+                # Progress unknown → full dotted white trail
                 if i % 2 == 0:
-                    buf[bar_y][bx] = dim
+                    buf[bar_y][bx] = _REMAINING
             elif i <= pos:
-                buf[bar_y][bx] = color
+                buf[bar_y][bx] = color        # solid = completed
             elif i % 2 == 0:
-                buf[bar_y][bx] = dim
+                buf[bar_y][bx] = _REMAINING   # dotted = remaining
     elif pos is not None:
+        # No remaining indicator: solid bar up to current position only
         for i in range(pos + 1):
             bx = x0 + i
             if 0 <= bx < W and 0 <= bar_y < H:
@@ -72,22 +76,6 @@ def _draw_progress(buf, block: LayoutBlock, flight: Flight, W: int, H: int) -> N
                     px, py = end_x + dx_, bar_y + dy_
                     if x0 <= px < x1 and 0 <= py < H:
                         buf[py][px] = color
-
-    # No standalone aircraft-position marker — the bar itself shows the
-    # position (its end when show_remaining is off, or the solid → dotted
-    # transition when it's on). Keeps the bar a clean straight line.
-
-    # Remaining-distance text
-    if block.show_remaining:
-        rem = remaining_distance_km(flight)
-        if rem is not None:
-            unit = block.effective_unit or "km"
-            txt = f"{int(rem)}{unit}"
-            tw = text_width(txt, block.font_scale)
-            tx = x0 + max(0, width - tw)
-            ty = y0 + bar_block_h + 1
-            draw_text(buf, tx, ty, txt, color,
-                      max_width=width, scale=block.font_scale)
 
 
 def _render_block(buf, block: LayoutBlock, flight: Flight, W: int, H: int) -> None:
