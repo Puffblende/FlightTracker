@@ -391,13 +391,10 @@ class MainWindow(QMainWindow):
             self._save_state()
 
     def _save_state(self, layout_override: list | None = None):
-        """
-        Write current state to autosave and to the named preset (if any).
-        Uses self._layout directly — no roundtrip through the editor canvas.
-        """
+        """Write current state to autosave and to the named preset (if any)."""
         try:
             st     = self._settings.get_state()
-            layout = layout_override if layout_override is not None else self._layout
+            layout = layout_override if layout_override is not None else self._editor.get_layout()
             data   = build_preset_data(
                 name=self._current_preset or "_autosave",
                 layout=layout,
