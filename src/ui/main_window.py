@@ -83,16 +83,23 @@ class MainWindow(QMainWindow):
         sc = QShortcut(QKeySequence.StandardKey.Save, self)
         sc.activated.connect(self._save_preset)
 
-        # Load last used preset → autosave → fresh location detect
+        # Defer initial preset load until after the window has been shown.
+        # On Windows, the QGraphicsView geometry doesn't fully settle until
+        # the first event-loop tick — running the load inside __init__ used to
+        # mean a saved layout was applied to a not-yet-laid-out canvas, so the
+        # user had to re-select the preset to re-trigger the apply.
+        QTimer.singleShot(0, self._do_initial_load)
+
+    def _do_initial_load(self):
         last = get_last_preset()
         if last and load_preset(last) is not None:
             self._load_preset_by_name(last)
-        else:
-            saved = load_autosave()
-            if saved is not None:
-                self._apply_preset_data(saved, name=None)
-            else:
-                self._fetch_location()
+            return
+        saved = load_autosave()
+        if saved is not None:
+            self._apply_preset_data(saved, name=None)
+            return
+        self._fetch_location()
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -391,11 +398,19 @@ class MainWindow(QMainWindow):
             self._save_state()
 
     def _save_state(self, layout_override: list | None = None):
-        """Write current state to autosave and to the named preset (if any)."""
+        """Write current state to autosave and to the named preset (if any).
+        Errors surface in the status bar instead of being swallowed silently
+        — if save ever fails the user needs to know."""
         try:
-            st     = self._settings.get_state()
-            layout = layout_override if layout_override is not None else self._editor.get_layout()
-            data   = build_preset_data(
+            st = self._settings.get_state()
+            # Explicitly capture latest canvas positions before serialising.
+            # get_layout() already calls _sync_positions(), but doing it
+            # again here is cheap and guarantees the latest drag is recorded.
+            if layout_override is not None:
+                layout = layout_override
+            else:
+                layout = self._editor.get_layout()
+            data = build_preset_data(
                 name=self._current_preset or "_autosave",
                 layout=layout,
                 display_key=st["display_key"],
@@ -411,8 +426,12 @@ class MainWindow(QMainWindow):
             save_autosave(data)
             if self._current_preset:
                 save_preset(self._current_preset, data)
-        except Exception:
-            pass
+        except Exception as e:
+            # Surface the error so persistence problems aren't invisible.
+            try:
+                self._sb_status.setText(f"Save failed: {e}")
+            except Exception:
+                pass
 
     def _refresh_preset_combo(self):
         self._loading_preset = True
@@ -625,6 +644,10 @@ class MainWindow(QMainWindow):
             self._editor.set_layout(blocks)
             self._editor.apply_display_size()
             self._layout = self._editor.get_layout()
+            # Defensive second pass: after Qt has had a tick to lay things
+            # out, re-apply so the canvas reliably reflects the saved
+            # positions even on platforms where geometry settles late.
+            QTimer.singleShot(0, lambda: self._editor.set_layout(self._layout))
 
             if self._overlay and self._overlay.isVisible():
                 self._overlay.apply_display_size()
