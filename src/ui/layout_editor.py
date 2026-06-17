@@ -629,7 +629,7 @@ class LayoutEditorWidget(QWidget):
         self._scene = QGraphicsScene(0, 0, self._PW, self._PH)
         self._draw_grid()
         self._view = _CanvasView(self._scene, self._emit)
-        self._view.setBackgroundBrush(QBrush(QColor(12, 12, 12)))
+        self._view.setBackgroundBrush(QBrush(QColor(245, 245, 245)))
         self._view.setFrameShape(QGraphicsView.Shape.Box)
         self._view.setFixedSize(self._PW + 4, self._PH + 4)
         self._view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -637,8 +637,8 @@ class LayoutEditorWidget(QWidget):
         self._canvas_layout.addWidget(self._view)
 
     def _draw_grid(self):
-        pen_major = QPen(QColor(45, 45, 45), 0.5)
-        pen_minor = QPen(QColor(28, 28, 28), 0.3)
+        pen_major = QPen(QColor(196, 196, 196), 0.5)
+        pen_minor = QPen(QColor(225, 225, 225), 0.3)
         for x in range(0, self._PW + 1, self._GS):
             pen = pen_major if (x // self._GS) % 8 == 0 else pen_minor
             self._scene.addLine(x, 0, x, self._PH, pen)

@@ -140,8 +140,8 @@ class MainWindow(QMainWindow):
         bar = QWidget()
         bar.setObjectName("presetBar")
         bar.setStyleSheet(
-            "QWidget#presetBar { background:#111111; border-bottom:1px solid #1e1e1e; }"
-            "QWidget#presetBar > QLabel { background:transparent; color:#555; font-size:11px; }"
+            "QWidget#presetBar { background:#f5f5f5; border-bottom:1px solid #d8d8d8; }"
+            "QWidget#presetBar > QLabel { background:transparent; color:#666; font-size:11px; }"
         )
         bar.setFixedHeight(44)
 
@@ -244,28 +244,30 @@ class MainWindow(QMainWindow):
         # ── Flight info strip ──────────────────────────────────────────
         info_strip = QWidget()
         info_strip.setStyleSheet(
-            "background:#131313; border-bottom:1px solid #1e1e1e;"
+            "background:#f5f5f5; border-bottom:1px solid #d8d8d8;"
         )
         info_row = QHBoxLayout(info_strip)
         info_row.setContentsMargins(16, 8, 16, 8)
         self.lbl_showing = QLabel("No signal")
         self.lbl_showing.setStyleSheet(
             "font-family:'Courier New'; font-size:12px; font-weight:bold;"
-            "color:#5a5a5a; background:transparent;"
+            "color:#444444; background:transparent;"
         )
         info_row.addWidget(self.lbl_showing)
         info_row.addStretch()
         self.lbl_info = QLabel("")
         self.lbl_info.setStyleSheet(
-            "font-family:'Courier New'; font-size:10px; color:#484848;"
+            "font-family:'Courier New'; font-size:10px; color:#666666;"
             "background:transparent;"
         )
         info_row.addWidget(self.lbl_info)
         right.addWidget(info_strip)
 
         # ── LED card ───────────────────────────────────────────────────
+        # LED panel keeps a dark surround so the lit LEDs read with high
+        # contrast — that's the "matrix" aesthetic regardless of theme.
         led_card = QWidget()
-        led_card.setStyleSheet("background:#282828;")
+        led_card.setStyleSheet("background:#1c1c1c;")
         led_layout = QVBoxLayout(led_card)
         led_layout.setContentsMargins(24, 24, 24, 24)
         self._led = LEDWidget()
@@ -281,7 +283,7 @@ class MainWindow(QMainWindow):
         # ── Navigation bar ─────────────────────────────────────────────
         nav_bar = QWidget()
         nav_bar.setStyleSheet(
-            "background:#111111; border-top:1px solid #1e1e1e;"
+            "background:#f5f5f5; border-top:1px solid #d8d8d8;"
         )
         nav_row = QHBoxLayout(nav_bar)
         nav_row.setContentsMargins(14, 8, 14, 8)
