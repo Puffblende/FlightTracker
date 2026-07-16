@@ -45,7 +45,7 @@ class _Worker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(1100, 600)
+        self.setMinimumSize(820, 520)
 
         self._location      = None   # Location | None
         self._flights       = []     # list[Flight]
@@ -79,27 +79,40 @@ class MainWindow(QMainWindow):
         self._refresh_preset_combo()
         self._update_title()
 
+        self._initial_load_done = False
+
         # Cmd+S / Ctrl+S → save preset
         sc = QShortcut(QKeySequence.StandardKey.Save, self)
         sc.activated.connect(self._save_preset)
 
-        # Defer initial preset load until after the window has been shown.
-        # On Windows, the QGraphicsView geometry doesn't fully settle until
-        # the first event-loop tick — running the load inside __init__ used to
-        # mean a saved layout was applied to a not-yet-laid-out canvas, so the
-        # user had to re-select the preset to re-trigger the apply.
-        QTimer.singleShot(0, self._do_initial_load)
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._initial_load_done:
+            self._initial_load_done = True
+            # Fire after the window's first show event is fully processed so
+            # every widget has settled its geometry before we apply the preset.
+            QTimer.singleShot(0, self._do_initial_load)
 
     def _do_initial_load(self):
         last = get_last_preset()
-        if last and load_preset(last) is not None:
+        print(f"[startup] last_preset={last!r}")
+        data = load_preset(last) if last else None
+        print(f"[startup] load_preset={'ok' if data else 'None'}")
+        if last and data is not None:
             self._load_preset_by_name(last)
+            print(f"[startup] after load: preset={self._current_preset!r} dirty={self._dirty} combo={self._preset_combo.currentText()!r} title={self.windowTitle()!r}")
+            QTimer.singleShot(200, self._debug_state)
             return
         saved = load_autosave()
+        print(f"[startup] autosave={'ok' if saved else 'None'}")
         if saved is not None:
             self._apply_preset_data(saved, name=None)
+            print(f"[startup] after autosave: preset={self._current_preset!r} dirty={self._dirty} combo={self._preset_combo.currentText()!r}")
             return
         self._fetch_location()
+
+    def _debug_state(self):
+        print(f"[+200ms] preset={self._current_preset!r} dirty={self._dirty} combo={self._preset_combo.currentText()!r} title={self.windowTitle()!r} loading={self._loading_preset}")
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -118,7 +131,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._build_editor_tab(),   "Layout Editor")
         self._tabs.addTab(self._build_list_tab(),     "Flight List")
 
-        self._external_tab = ExternalDisplayTab()
+        self._external_tab = ExternalDisplayTab(main_window=self)
         self._tabs.addTab(self._external_tab, "External Display")
         vbox.addWidget(self._tabs)
 
@@ -211,11 +224,13 @@ class MainWindow(QMainWindow):
         return bar
 
     def _build_display_tab(self):
+        from PyQt6.QtWidgets import QScrollArea
+
         page   = QWidget()
         root   = QHBoxLayout(page)
         root.setContentsMargins(10, 10, 10, 10)
 
-        # Left: settings panel
+        # Left: settings panel (wrapped in a scroll area so it works at any window height)
         self._settings = SettingsPanel()
         self._settings.location_requested.connect(self._fetch_location)
         self._settings.geocode_requested.connect(self._geocode_address)
@@ -234,7 +249,16 @@ class MainWindow(QMainWindow):
         self._settings.display_size_changed.connect(lambda _: self._mark_dirty())
         self._settings.custom_display_size_changed.connect(lambda *_: self._mark_dirty())
 
-        root.addWidget(self._settings)
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidget(self._settings)
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        settings_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        settings_scroll.setFixedWidth(272)
+        settings_scroll.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }"
+        )
+        root.addWidget(settings_scroll)
 
         # Right: LED display card + controls
         right = QVBoxLayout()
@@ -387,6 +411,10 @@ class MainWindow(QMainWindow):
     def _mark_dirty(self):
         if self._loading_preset:
             return
+        import traceback, io
+        buf = io.StringIO()
+        traceback.print_stack(file=buf, limit=5)
+        print(f"[dirty] preset={self._current_preset!r}\n{buf.getvalue()}")
         if not self._dirty:
             self._dirty = True
             self._btn_save.setEnabled(self._current_preset is not None)
@@ -436,6 +464,7 @@ class MainWindow(QMainWindow):
                 pass
 
     def _refresh_preset_combo(self):
+        prev = self._loading_preset
         self._loading_preset = True
         try:
             self._preset_combo.blockSignals(True)
@@ -453,7 +482,7 @@ class MainWindow(QMainWindow):
                 self._preset_combo.setCurrentIndex(0)
             self._preset_combo.blockSignals(False)
         finally:
-            self._loading_preset = False
+            self._loading_preset = prev
 
     def _on_preset_combo_changed(self, idx: int):
         if self._loading_preset:

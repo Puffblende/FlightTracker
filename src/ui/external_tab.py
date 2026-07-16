@@ -5,8 +5,10 @@ or via Bluetooth LE, connect, and stream live frames to them.
 """
 from __future__ import annotations
 
+import json
 import threading
 from datetime import datetime
+from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
@@ -19,19 +21,23 @@ from PyQt6.QtGui import QFont
 from src.external.discovery import scan_wifi, scan_ble, MatrixDevice, DATA_PORT
 from src.external.protocol import UDPSender
 
+_DEVICE_IP_FILE = Path.home() / ".flighttracker" / "device_ip.json"
+
 
 class _Sig(QObject):
     """Cross-thread signals for the tab."""
     device_found = pyqtSignal(object)   # MatrixDevice
     scan_done    = pyqtSignal(str)      # "wifi" | "ble"
     ble_error    = pyqtSignal(str)
+    push_done    = pyqtSignal(bool, str)  # success, message
 
 
 class ExternalDisplayTab(QWidget):
     """Tab for connecting to ESP32-based LED matrix displays."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, main_window=None):
         super().__init__(parent)
+        self._main_window = main_window
         self._devices: list[MatrixDevice] = []
         self._sender:  UDPSender | None   = None
         self._frame_count = 0
@@ -41,8 +47,10 @@ class ExternalDisplayTab(QWidget):
         self._sig.device_found.connect(self._on_device_found)
         self._sig.scan_done.connect(self._on_scan_done)
         self._sig.ble_error.connect(lambda e: self._log(f"Bluetooth error: {e}"))
+        self._sig.push_done.connect(self._on_push_done)
 
         self._build_ui()
+        self._load_device_ip()
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -53,6 +61,7 @@ class ExternalDisplayTab(QWidget):
 
         root.addWidget(self._build_discovery())
         root.addWidget(self._build_connection())
+        root.addWidget(self._build_push_config())
         root.addWidget(self._build_log())
         root.addWidget(self._build_hint())
 
@@ -134,6 +143,33 @@ class ExternalDisplayTab(QWidget):
         self._lbl_frames.setStyleSheet("color: #666;")
         row2.addWidget(self._lbl_frames)
         v.addLayout(row2)
+
+        return box
+
+    def _build_push_config(self) -> QGroupBox:
+        box = QGroupBox("Push Configuration")
+        v   = QVBoxLayout(box)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Device IP:"))
+        self._txt_push_ip = QLineEdit()
+        self._txt_push_ip.setPlaceholderText("192.168.x.x")
+        self._txt_push_ip.setMaximumWidth(150)
+        row.addWidget(self._txt_push_ip)
+        row.addStretch()
+        self._btn_push = QPushButton("Push Config")
+        self._btn_push.setMinimumWidth(110)
+        self._btn_push.clicked.connect(self._push_config)
+        row.addWidget(self._btn_push)
+        v.addLayout(row)
+
+        hint = QLabel(
+            "Sends location, radius, intervals, credentials, and the full layout "
+            "to the ESP32 via HTTP POST /config."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #666; font-size: 10px;")
+        v.addWidget(hint)
 
         return box
 
@@ -273,6 +309,174 @@ class ExternalDisplayTab(QWidget):
             self._frame_count += 1
             if self._frame_count % 30 == 0:
                 self._lbl_frames.setText(f"Frames sent: {self._frame_count:,}")
+
+    # ── Push Configuration ────────────────────────────────────────────────────
+
+    def _load_device_ip(self):
+        try:
+            data = json.loads(_DEVICE_IP_FILE.read_text())
+            ip = data.get("ip", "")
+            if ip:
+                self._txt_push_ip.setText(ip)
+        except Exception:
+            pass
+
+    def _save_device_ip(self, ip: str):
+        try:
+            _DEVICE_IP_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _DEVICE_IP_FILE.write_text(json.dumps({"ip": ip}))
+        except Exception:
+            pass
+
+    def _encode_logos(self) -> dict[str, str]:
+        """Return {ICAO: hex_string} for current airlines' logos at 24×24 RGB.
+
+        The hex string is the raw pixel bytes (24*24*3 = 1728 bytes) encoded
+        as lowercase hex.  The ESP32 decodes this and saves it to SPIFFS,
+        bypassing the SSL-broken internet fetch on the device.
+        """
+        mw = self._main_window
+        if not mw:
+            return {}
+        flights = getattr(mw, '_flights', []) or []
+        if not flights:
+            return {}
+        try:
+            from src.api.logos import get_logo
+        except ImportError:
+            return {}
+
+        result: dict[str, str] = {}
+        seen: set[str] = set()
+        for flight in flights[:15]:
+            raw = (getattr(flight, 'airline_icao', '') or "").strip()
+            if not raw and len(flight.callsign or "") >= 3:
+                raw = flight.callsign[:3]
+            icao = raw.upper()
+            if len(icao) != 3 or not icao.isalpha() or icao in seen:
+                continue
+            seen.add(icao)
+            try:
+                img = get_logo(getattr(flight, 'airline_iata', '') or '', 24, 24, icao)
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                result[icao] = img.tobytes().hex()
+            except Exception:
+                continue
+        return result
+
+    def _collect_airline_names(self) -> dict[str, str]:
+        """Return {ICAO: name} for current airlines from the live flight list."""
+        mw = self._main_window
+        if not mw:
+            return {}
+        flights = getattr(mw, '_flights', []) or []
+        result: dict[str, str] = {}
+        seen: set[str] = set()
+        for flight in flights[:15]:
+            raw = (getattr(flight, 'airline_icao', '') or "").strip()
+            if not raw and len(flight.callsign or "") >= 3:
+                raw = flight.callsign[:3]
+            icao = raw.upper()
+            if len(icao) != 3 or not icao.isalpha() or icao in seen:
+                continue
+            seen.add(icao)
+            name = getattr(flight, 'airline_name', '') or ""
+            if name:
+                result[icao] = name
+        return result
+
+    def _build_config_payload(self) -> dict:
+        mw = self._main_window
+        if mw is None:
+            raise RuntimeError("No main window reference")
+
+        loc = mw._location
+        if loc is None:
+            raise RuntimeError("Location not set — fetch location first")
+
+        st = mw._settings.get_state()
+
+        from src.core.displays import get_display_size
+        display_w, display_h = get_display_size()
+
+        blocks = mw._editor.get_layout()
+        layout = [
+            {
+                "key":          b.key,
+                "x":            b.x,
+                "y":            b.y,
+                "enabled":      b.enabled,
+                "fmt":          b.fmt,
+                "color":        list(b.color),
+                "custom_label": b.custom_label,
+                "custom_unit":  b.custom_unit,
+                "font_scale":   b.font_scale,
+                "custom_width": b.custom_width,
+            }
+            for b in blocks
+        ]
+
+        logos         = self._encode_logos()
+        airline_names = self._collect_airline_names()
+
+        return {
+            "lat":              float(loc.lat),
+            "lon":              float(loc.lon),
+            "radius_km":        float(st["radius"]),
+            "fetch_interval_s": int(st["fetch_interval"]),
+            "cycle_interval_s": int(st["cycle_interval"]),
+            "opensky_user":     str(mw._os_user or ""),
+            "opensky_pass":     str(mw._os_pass or ""),
+            "display_w":        int(display_w),
+            "display_h":        int(display_h),
+            "layout":           layout,
+            "logos":            logos,          # {ICAO: hex_string} 24×24 RGB
+            "airline_names":    airline_names,  # {ICAO: name}
+        }
+
+    def _push_config(self):
+        ip = self._txt_push_ip.text().strip()
+        if not ip:
+            self._log("Enter a device IP address first.")
+            return
+
+        try:
+            payload = self._build_config_payload()
+        except RuntimeError as e:
+            self._log(f"Push aborted: {e}")
+            return
+
+        self._btn_push.setEnabled(False)
+        n_logos = len(payload.get('logos', {}))
+        n_names = len(payload.get('airline_names', {}))
+        self._log(f"Pushing config to http://{ip}/config "
+                  f"({n_logos} logos, {n_names} airline names) …")
+
+        def _run():
+            try:
+                import requests as req
+                resp = req.post(
+                    f"http://{ip}/config",
+                    json=payload,
+                    timeout=10,
+                )
+                ok  = resp.status_code == 200
+                msg = f"HTTP {resp.status_code}: {resp.text[:200].strip()}"
+                self._sig.push_done.emit(ok, msg)
+            except Exception as exc:
+                self._sig.push_done.emit(False, str(exc))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_push_done(self, success: bool, message: str):
+        self._btn_push.setEnabled(True)
+        if success:
+            ip = self._txt_push_ip.text().strip()
+            self._save_device_ip(ip)
+            self._log(f"Config pushed successfully — {message}")
+        else:
+            self._log(f"Push failed: {message}")
 
     # ── Log ───────────────────────────────────────────────────────────────────
 
