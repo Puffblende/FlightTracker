@@ -176,7 +176,6 @@ static bool parseAcArray(const String& body, float lat, float lon,
         f.distance_km = isnan(dst_nm) ? haversineKm(lat, lon, fLat, fLon)
                                       : dst_nm * 1.852f;
 
-        logoFetchEnqueue(f.callsign, f.airline_iata);
         (*count)++;
     }
 
@@ -461,7 +460,6 @@ static bool fetchAdsbFi(const char* path, float lat, float lon,
         f.distance_km = isnan(dst_nm) ? haversineKm(lat, lon, fLat, fLon)
                                       : dst_nm * 1.852f;
 
-        logoFetchEnqueue(f.callsign, f.airline_iata);
         (*count)++;
     }
 
@@ -558,8 +556,6 @@ static int tryOpenSky(float lat, float lon, float radius_km,
             if (f.airline_icao[i] >= 'a') f.airline_icao[i] -= 32;
         const char* iata = airlineIcaoToIata(f.airline_icao);
         strncpy(f.airline_iata, iata, sizeof(f.airline_iata) - 1);
-
-        logoFetchEnqueue(f.callsign, f.airline_iata);
 
         f.latitude      = fLat;
         f.longitude     = fLon;

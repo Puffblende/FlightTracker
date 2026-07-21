@@ -94,6 +94,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._do_initial_load)
 
     def _do_initial_load(self):
+        self._prefetch_airline_logos()
+
         last = get_last_preset()
         print(f"[startup] last_preset={last!r}")
         data = load_preset(last) if last else None
@@ -113,6 +115,19 @@ class MainWindow(QMainWindow):
 
     def _debug_state(self):
         print(f"[+200ms] preset={self._current_preset!r} dirty={self._dirty} combo={self._preset_combo.currentText()!r} title={self.windowTitle()!r} loading={self._loading_preset}")
+
+    def _prefetch_airline_logos(self):
+        try:
+            from src.api.logos import prefetch_all_known_logos
+        except Exception as exc:
+            print(f"[startup] logo prefetch unavailable: {exc}")
+            return
+
+        thread = threading.Thread(
+            target=lambda: prefetch_all_known_logos(24, 24),
+            daemon=True,
+        )
+        thread.start()
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -268,20 +283,20 @@ class MainWindow(QMainWindow):
         # ── Flight info strip ──────────────────────────────────────────
         info_strip = QWidget()
         info_strip.setStyleSheet(
-            "background:#f5f5f5; border-bottom:1px solid #d8d8d8;"
+            "background:#161a22; border-bottom:1px solid #2b3140;"
         )
         info_row = QHBoxLayout(info_strip)
         info_row.setContentsMargins(16, 8, 16, 8)
         self.lbl_showing = QLabel("No signal")
         self.lbl_showing.setStyleSheet(
             "font-family:'Courier New'; font-size:12px; font-weight:bold;"
-            "color:#444444; background:transparent;"
+            "color:#f3f6fb; background:transparent;"
         )
         info_row.addWidget(self.lbl_showing)
         info_row.addStretch()
         self.lbl_info = QLabel("")
         self.lbl_info.setStyleSheet(
-            "font-family:'Courier New'; font-size:10px; color:#666666;"
+            "font-family:'Courier New'; font-size:10px; color:#9aa4b2;"
             "background:transparent;"
         )
         info_row.addWidget(self.lbl_info)
@@ -307,7 +322,7 @@ class MainWindow(QMainWindow):
         # ── Navigation bar ─────────────────────────────────────────────
         nav_bar = QWidget()
         nav_bar.setStyleSheet(
-            "background:#f5f5f5; border-top:1px solid #d8d8d8;"
+            "background:#161a22; border-top:1px solid #2b3140;"
         )
         nav_row = QHBoxLayout(nav_bar)
         nav_row.setContentsMargins(14, 8, 14, 8)
@@ -555,6 +570,7 @@ class MainWindow(QMainWindow):
         self._act_delete.setEnabled(True)
         self._refresh_preset_combo()
         self._update_title()
+        self._load_preset_by_name(name)
 
     def _save_as_impl(self) -> bool:
         text, ok = QInputDialog.getText(
@@ -620,9 +636,8 @@ class MainWindow(QMainWindow):
             self._os_user = ""
             self._os_pass = ""
             self._layout = default_layout()
-            self._editor.set_layout(self._layout)
             self._led.apply_display_size()
-            self._editor.apply_display_size()
+            self._editor.set_layout(self._layout)
             self._layout = self._editor.get_layout()
             self._current_preset = None
             self._dirty = False
@@ -638,6 +653,12 @@ class MainWindow(QMainWindow):
         data = load_preset(name)
         if data is not None:
             self._apply_preset_data(data, name=name)
+        else:
+            self._current_preset = None
+            self._dirty = False
+            self._btn_save.setEnabled(False)
+            self._act_delete.setEnabled(False)
+            self._update_title()
 
     def _apply_preset_data(self, data: dict, name: str | None):
         """Apply a preset dict. name=None means autosave / anonymous restore."""
@@ -673,12 +694,7 @@ class MainWindow(QMainWindow):
             self._layout = blocks
             self._led.apply_display_size()
             self._editor.set_layout(blocks)
-            self._editor.apply_display_size()
             self._layout = self._editor.get_layout()
-            # Defensive second pass: after Qt has had a tick to lay things
-            # out, re-apply so the canvas reliably reflects the saved
-            # positions even on platforms where geometry settles late.
-            QTimer.singleShot(0, lambda: self._editor.set_layout(self._layout))
 
             if self._overlay and self._overlay.isVisible():
                 self._overlay.apply_display_size()

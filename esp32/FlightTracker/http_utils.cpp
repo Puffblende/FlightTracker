@@ -36,6 +36,12 @@ int fetchUrlPlain(const char* url, String& result) {
         result = http.getString();
 
     http.end();
+    // http.end() already stops the client, but the heap-allocated WiFiClient's
+    // own destructor (below) redundantly tears down the same lwIP socket —
+    // without this stop()+delay(), that second teardown can race the first
+    // and free an already-freed pbuf ("assert failed: pbuf_free ... p->ref > 0").
+    client->stop();
+    delay(10);
     delete client;
     return code;
 }
@@ -97,6 +103,7 @@ int fetchHTTPS(const char* host, const char* path, String& result) {
             plainClient.print(req);
             int code = readHttpResponse(plainClient, result);
             plainClient.stop();
+            delay(10);
             if (code == 200) {
                 Serial.println("[HTTP] Plain HTTP worked!");
                 return 200;
@@ -120,6 +127,7 @@ int fetchHTTPS(const char* host, const char* path, String& result) {
         sslClient.print(req);
         int code = readHttpResponse(sslClient, result);
         sslClient.stop();
+        delay(10);
         return code;
     }
 }
@@ -159,6 +167,10 @@ int fetchUrl(const char* url, String& result,
         result = http.getString();
 
     http.end();
+    // See fetchUrlPlain() above: stop the client explicitly (and let lwIP
+    // settle) before its destructor runs, to avoid a double pbuf free.
+    client->stop();
+    delay(10);
     delete client;
     return code;
 }

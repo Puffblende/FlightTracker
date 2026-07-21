@@ -509,6 +509,7 @@ class LayoutEditorWidget(QWidget):
         self._rows: dict[str, BlockRow] = {}
         self._selected_key: str | None = None
         self._flight: Flight | None = None
+        self._loading = False
         self._init_ui()
         self._build_canvas()
         self._populate()
@@ -517,6 +518,12 @@ class LayoutEditorWidget(QWidget):
 
     def set_flight(self, flight: Flight | None):
         """Live flight whose values feed the preview rectangles."""
+        if self._loading:
+            # A preset load is actively rebuilding the canvas — _items is
+            # transiently incomplete, so _rebuild_item() would read a wrong
+            # "current" position instead of preserving it. Skip; the next
+            # set_flight() call (fetch tick / cycle) will pick it up.
+            return
         self._flight = flight
         # Rebuild all canvas items so they pick up new values — but skip any
         # item that's currently being dragged, otherwise the in-progress drag
@@ -629,7 +636,8 @@ class LayoutEditorWidget(QWidget):
         self._scene = QGraphicsScene(0, 0, self._PW, self._PH)
         self._draw_grid()
         self._view = _CanvasView(self._scene, self._emit)
-        self._view.setBackgroundBrush(QBrush(QColor(245, 245, 245)))
+        self._view.setBackgroundBrush(QBrush(QColor(13, 16, 22)))
+        self._view.setStyleSheet("background-color:#0f1115; border:1px solid #2b3140;")
         self._view.setFrameShape(QGraphicsView.Shape.Box)
         self._view.setFixedSize(self._PW + 4, self._PH + 4)
         self._view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -704,6 +712,16 @@ class LayoutEditorWidget(QWidget):
         if block is None:
             return
         block.enabled = enabled
+        if self._loading:
+            # set_layout() is driving these checkboxes to match a freshly
+            # loaded preset; the canvas still has the previous display's
+            # stale dimensions and leftover items at this point, so
+            # rebuilding/syncing here would clamp against the wrong size
+            # and overwrite other blocks' just-loaded positions with
+            # whatever's still on screen from before. _populate(), called
+            # once at the end of set_layout() with correct dimensions and
+            # the full block list, is the sole source of truth for a load.
+            return
         if enabled:
             self._rebuild_item(block)
             self._on_select(key)
@@ -799,20 +817,24 @@ class LayoutEditorWidget(QWidget):
     def set_layout(self, blocks: list[LayoutBlock]) -> None:
         """Restore an external layout without emitting layout_changed."""
         from src.core.models import BLOCK_TYPES
-        self._blocks = list(blocks)
-        # Ensure every known block type is present (add disabled stubs for missing ones)
-        existing = {b.key for b in self._blocks}
-        for key, _label, _color in BLOCK_TYPES:
-            if key not in existing:
-                self._blocks.append(LayoutBlock(key, 0, 0, False))
-        for key, row in self._rows.items():
-            block = next((b for b in self._blocks if b.key == key), None)
-            if block:
-                row.set_enabled(block.enabled)
-                row.refresh_color(block.color)
-        self._selected_key = None
-        self._custom.show_block(None)
-        self._populate()
+        self._loading = True
+        try:
+            self._blocks = list(blocks)
+            # Ensure every known block type is present (add disabled stubs for missing ones)
+            existing = {b.key for b in self._blocks}
+            for key, _label, _color in BLOCK_TYPES:
+                if key not in existing:
+                    self._blocks.append(LayoutBlock(key, 0, 0, False))
+            for key, row in self._rows.items():
+                block = next((b for b in self._blocks if b.key == key), None)
+                if block:
+                    row.set_enabled(block.enabled)
+                    row.refresh_color(block.color)
+            self._selected_key = None
+            self._custom.show_block(None)
+            self._populate()
+        finally:
+            self._loading = False
 
     def _reset(self):
         self._blocks = default_layout()

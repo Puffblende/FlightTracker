@@ -114,7 +114,10 @@ BLOCK_FORMATS: dict[str, list[FormatSpec]] = {
     ],
     "aircraft_type": [
         FormatSpec("code", "B738  (ICAO code)",        4,  "", ""),
-        FormatSpec("full", "B737-800  (full name)",   13,  "", ""),
+        FormatSpec("short", "B738  (short type)",      4,  "", ""),
+        FormatSpec("manufacturer", "BOEING  (manufacturer)", 7, "", ""),
+        FormatSpec("model", "737-800  (model)",       8,  "", ""),
+        FormatSpec("full", "BOEING 737-800  (full name)", 16,  "", ""),
     ],
     "altitude": [
         FormatSpec("ft_full",    "36000  (ft)",        5, "A:", "ft"),
@@ -422,11 +425,22 @@ def value_aircraft_type(flight, fmt_id: str) -> str:
     typ = (flight.aircraft_type or "").strip()
     if not typ:
         return "----"
+
+    from src.core.aircraft_types import lookup_type
+
+    full = lookup_type(typ) or ""
     if fmt_id == "full":
-        # Lookup table src/core/aircraft_types.py maps ICAO codes → model names.
-        from src.core.aircraft_types import lookup_type
-        full = lookup_type(typ)
-        return (full or typ).upper()
+        return full.upper()
+    if fmt_id == "manufacturer":
+        parts = full.split(" ", 1)
+        return parts[0].upper() if parts else ""
+    if fmt_id == "model":
+        if not full:
+            return ""
+        parts = full.split(" ", 1)
+        return parts[1].upper() if len(parts) > 1 else full.upper()
+    if fmt_id == "short":
+        return typ[:4].upper()
     return typ[:4].upper()
 
 

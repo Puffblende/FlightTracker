@@ -68,6 +68,60 @@ static void fmtDistance(char* out, int sz, float km, const char* fmt) {
     else                               snprintf(out, sz, "%.1f", km);
 }
 
+static bool airportLocation(const char* code, float& lat, float& lon) {
+    if (!code || !code[0]) return false;
+    char key[5] = {0};
+    strncpy(key, code, sizeof(key) - 1);
+    for (int i = 0; key[i]; i++) if (key[i] >= 'a') key[i] -= 32;
+
+    static const struct { const char* code; float lat; float lon; } AIRPORTS[] = {
+        {"FRA", 50.0379f, 8.5622f}, {"EDDF", 50.0379f, 8.5622f},
+        {"MUC", 48.3538f, 11.7861f}, {"EDDM", 48.3538f, 11.7861f},
+        {"LHR", 51.4700f, -0.4543f}, {"EGLL", 51.4700f, -0.4543f},
+        {"CDG", 49.0097f, 2.5479f}, {"LFPG", 49.0097f, 2.5479f},
+        {"JFK", 40.6413f, -73.7781f}, {"KJFK", 40.6413f, -73.7781f},
+        {"LAX", 33.9416f, -118.4085f}, {"KLAX", 33.9416f, -118.4085f},
+        {"SFO", 37.6188f, -122.3754f}, {"KSFO", 37.6188f, -122.3754f},
+        {"ORD", 41.9742f, -87.9073f}, {"KORD", 41.9742f, -87.9073f},
+        {"ATL", 33.6407f, -84.4277f}, {"KATL", 33.6407f, -84.4277f},
+        {"HND", 35.5494f, 139.7798f}, {"RJTT", 35.5494f, 139.7798f},
+        {"NRT", 35.7720f, 140.3929f}, {"RJAA", 35.7720f, 140.3929f},
+        {"SIN", 1.3644f, 103.9915f}, {"WSSS", 1.3644f, 103.9915f},
+        {"SYD", -33.9399f, 151.1753f}, {"YSSY", -33.9399f, 151.1753f},
+    };
+
+    for (size_t i = 0; i < sizeof(AIRPORTS) / sizeof(AIRPORTS[0]); i++) {
+        if (strcmp(key, AIRPORTS[i].code) == 0) {
+            lat = AIRPORTS[i].lat;
+            lon = AIRPORTS[i].lon;
+            return true;
+        }
+    }
+    return false;
+}
+
+static float gcDistanceKm(float lat1, float lon1, float lat2, float lon2) {
+    constexpr float R = 6371.0f;
+    float p1 = lat1 * 0.0174532925f;
+    float p2 = lat2 * 0.0174532925f;
+    float dp = (lat2 - lat1) * 0.0174532925f;
+    float dl = (lon2 - lon1) * 0.0174532925f;
+    float a = sinf(dp / 2.0f) * sinf(dp / 2.0f) + cosf(p1) * cosf(p2) * sinf(dl / 2.0f) * sinf(dl / 2.0f);
+    return R * 2.0f * asinf(sqrtf(a));
+}
+
+static float flightProgress(const FlightData& f) {
+    float oLat, oLon, dLat, dLon;
+    if (!airportLocation(f.origin, oLat, oLon) || !airportLocation(f.destination, dLat, dLon))
+        return NAN;
+    if (isnan(f.latitude) || isnan(f.longitude)) return NAN;
+
+    float total = gcDistanceKm(oLat, oLon, dLat, dLon);
+    if (total <= 0.0f) return NAN;
+    float done = gcDistanceKm(oLat, oLon, f.latitude, f.longitude);
+    return fminf(fmaxf(done / total, 0.0f), 1.0f);
+}
+
 static void fmtRoute(char* out, int sz, const FlightData& f, const char* fmt) {
     const char* o = f.origin[0]      ? f.origin      : "???";
     const char* d = f.destination[0] ? f.destination : "???";
@@ -90,20 +144,44 @@ static void fmtAirline(char* out, int sz, const FlightData& f, const char* fmt) 
 }
 
 static void fmtAircraftType(char* out, int sz, const FlightData& f, const char* fmt) {
-    if (strcmp(fmt, "code") == 0) {
+    if (strcmp(fmt, "code") == 0 || strcmp(fmt, "short") == 0) {
         if (f.aircraft_type[0])
             snprintf(out, sz, "%.4s", f.aircraft_type);
         else
             snprintf(out, sz, "%.4s", f.callsign[0] ? f.callsign : f.icao24);
         for (int i = 0; out[i]; i++) if (out[i] >= 'a') out[i] -= 32;
-    } else {
-        // "full" — prefer long description, fall back to short code
-        const char* src = f.aircraft_type_full[0] ? f.aircraft_type_full
-                        : f.aircraft_type[0]       ? f.aircraft_type
-                        : nullptr;
-        if (src) snprintf(out, sz, "%s", src);
-        // leave out[0]='\0' when nothing available — isPlaceholder suppresses rendering
+        return;
     }
+
+    const char* full = f.aircraft_type_full[0] ? f.aircraft_type_full : "";
+    if (strcmp(fmt, "manufacturer") == 0) {
+        if (full[0]) {
+            char tmp[32];
+            strncpy(tmp, full, sizeof(tmp) - 1);
+            char* space = strchr(tmp, ' ');
+            if (space) *space = '\0';
+            snprintf(out, sz, "%s", tmp);
+        }
+        for (int i = 0; out[i]; i++) if (out[i] >= 'a') out[i] -= 32;
+        return;
+    }
+
+    if (strcmp(fmt, "model") == 0) {
+        if (full[0]) {
+            char tmp[32];
+            strncpy(tmp, full, sizeof(tmp) - 1);
+            char* space = strchr(tmp, ' ');
+            if (space) snprintf(out, sz, "%s", space + 1);
+            else       snprintf(out, sz, "%s", tmp);
+        }
+        for (int i = 0; out[i]; i++) if (out[i] >= 'a') out[i] -= 32;
+        return;
+    }
+
+    // "full" — prefer long description, fall back to short code
+    const char* src = full[0] ? full : f.aircraft_type[0] ? f.aircraft_type : nullptr;
+    if (src) snprintf(out, sz, "%s", src);
+    // leave out[0]='\0' when nothing available — isPlaceholder suppresses rendering
 }
 
 static void fmtSquawk(char* out, int sz, const FlightData& f) {
@@ -169,9 +247,12 @@ void renderFlight(const FlightData& flight,
             char icao[5] = {0};
             strncpy(icao, src, 3);
             for (int j = 0; icao[j]; j++) if (icao[j] >= 'a') icao[j] -= 32;
-            int sz = blk.custom_width > 0 ? blk.custom_width : 24;
+            int sz = 24;
+            if      (strcmp(blk.fmt, "sq16") == 0) sz = 16;
+            else if (strcmp(blk.fmt, "sq24") == 0) sz = 24;
+            else if (strcmp(blk.fmt, "sq32") == 0) sz = 32;
+            else if (strcmp(blk.fmt, "sq40") == 0) sz = 40;
             drawLogo(icao, blk.x, blk.y, sz, blk.r, blk.g, blk.b);
-            logoFetchEnqueue(flight.callsign, flight.airline_iata);
             continue;
         }
         if (strcmp(blk.key, "aircraft_type") == 0) {
@@ -206,11 +287,19 @@ void renderFlight(const FlightData& flight,
 
         if (strcmp(blk.key, "progress") == 0) {
             int barW = blk.custom_width > 0 ? blk.custom_width : TOTAL_WIDTH - blk.x;
-            for (int dx = 0; dx < barW; dx++)
-                displaySetPixel(blk.x + dx, blk.y,
-                                (dx & 1) ? 0 : blk.r,
-                                (dx & 1) ? 0 : blk.g,
-                                (dx & 1) ? 0 : blk.b);
+            if (barW < 1) continue;
+
+            float prog = flightProgress(flight);
+            int pos = !isnan(prog) ? (int)roundf((barW - 1) * fminf(fmaxf(prog, 0.0f), 1.0f)) : -1;
+            for (int dx = 0; dx < barW; dx++) {
+                int px = blk.x + dx;
+                if (px < 0 || px >= TOTAL_WIDTH) continue;
+                if (pos >= 0 && dx <= pos) {
+                    displaySetPixel(px, blk.y, blk.r, blk.g, blk.b);
+                } else if ((dx & 1) == 0) {
+                    displaySetPixel(px, blk.y, 60, 60, 60);
+                }
+            }
             continue;
         }
 

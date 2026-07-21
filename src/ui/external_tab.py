@@ -24,12 +24,64 @@ from src.external.protocol import UDPSender
 _DEVICE_IP_FILE = Path.home() / ".flighttracker" / "device_ip.json"
 
 
+def _parse_host_port(value: str, default_port: int) -> tuple[str, int]:
+    text = (value or "").strip()
+    if not text:
+        return "", default_port
+
+    if text.startswith("http://"):
+        text = text[len("http://"):]
+    elif text.startswith("https://"):
+        text = text[len("https://"):]
+
+    if ":" in text:
+        host, port_text = text.rsplit(":", 1)
+        host = host.strip()
+        port_text = port_text.strip()
+        if host and port_text.isdigit():
+            return host, int(port_text)
+
+    return text, default_port
+
+
+def _load_persisted_connection() -> dict[str, object]:
+    try:
+        data = json.loads(_DEVICE_IP_FILE.read_text())
+    except Exception:
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    ip = data.get("ip", "")
+    port = data.get("port", DATA_PORT)
+    push_ip = data.get("push_ip", ip)
+    try:
+        port_value = int(port)
+    except (TypeError, ValueError):
+        port_value = DATA_PORT
+
+    return {"ip": str(ip or ""), "port": port_value, "push_ip": str(push_ip or ip or "")}
+
+
+def _save_persisted_connection(ip: str, port: int, push_ip: str | None = None) -> None:
+    try:
+        _DEVICE_IP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        data = {"ip": ip, "port": port}
+        if push_ip is not None:
+            data["push_ip"] = push_ip
+        _DEVICE_IP_FILE.write_text(json.dumps(data))
+    except Exception:
+        pass
+
+
 class _Sig(QObject):
     """Cross-thread signals for the tab."""
     device_found = pyqtSignal(object)   # MatrixDevice
     scan_done    = pyqtSignal(str)      # "wifi" | "ble"
     ble_error    = pyqtSignal(str)
     push_done    = pyqtSignal(bool, str)  # success, message
+    log_msg      = pyqtSignal(str)        # background-thread log line
 
 
 class ExternalDisplayTab(QWidget):
@@ -48,9 +100,13 @@ class ExternalDisplayTab(QWidget):
         self._sig.scan_done.connect(self._on_scan_done)
         self._sig.ble_error.connect(lambda e: self._log(f"Bluetooth error: {e}"))
         self._sig.push_done.connect(self._on_push_done)
+        self._sig.log_msg.connect(self._log)
 
         self._build_ui()
+        self._restore_connection_state()
+        self._connect_connection_persistence()
         self._load_device_ip()
+        self._persist_connection_fields()
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -108,6 +164,7 @@ class ExternalDisplayTab(QWidget):
         self._txt_ip = QLineEdit()
         self._txt_ip.setPlaceholderText("192.168.x.x")
         self._txt_ip.setMaximumWidth(150)
+        self._txt_ip.textChanged.connect(self._persist_connection_fields)
         row1.addWidget(self._txt_ip)
 
         row1.addSpacing(8)
@@ -116,6 +173,7 @@ class ExternalDisplayTab(QWidget):
         self._spin_port.setRange(1024, 65535)
         self._spin_port.setValue(DATA_PORT)
         self._spin_port.setMaximumWidth(80)
+        self._spin_port.valueChanged.connect(self._persist_connection_fields)
         row1.addWidget(self._spin_port)
 
         row1.addSpacing(16)
@@ -186,10 +244,9 @@ class ExternalDisplayTab(QWidget):
 
     def _build_hint(self) -> QLabel:
         lbl = QLabel(
-            "ℹ  Your ESP32 must listen on UDP port 4211 and respond to discovery "
-            "broadcasts on port 4210.  Frame packets begin with magic bytes 'FTLD' "
-            "(4 B) + width (2 B) + height (2 B) + raw RGB data.  "
-            "See src/external/protocol.py for a sample Arduino sketch."
+            "ℹ  Discovery uses UDP port 4210; the ESP32 replies with its HTTP config URL. "
+            "The config endpoint is HTTP port 80, while the UDP frame stream uses the "
+            "device-specific port reported by discovery."
         )
         lbl.setWordWrap(True)
         lbl.setStyleSheet("color:#555; font-style:italic; font-size:10px;")
@@ -248,7 +305,8 @@ class ExternalDisplayTab(QWidget):
         dev: MatrixDevice = item.data(Qt.ItemDataRole.UserRole)
         if dev and dev.transport == "wifi":
             self._txt_ip.setText(dev.address)
-            self._spin_port.setValue(dev.port)
+            if not self._txt_push_ip.text().strip():
+                self._txt_push_ip.setText(dev.address)
             self._connect(dev)
 
     # ── Connection ────────────────────────────────────────────────────────────
@@ -257,13 +315,15 @@ class ExternalDisplayTab(QWidget):
         if self._sender and self._sender.is_open:
             self._disconnect()
         else:
-            ip = self._txt_ip.text().strip()
-            if not ip:
+            host, port = _parse_host_port(self._txt_ip.text(), self._spin_port.value())
+            if not host:
                 self._log("Enter an IP address first.")
                 return
+            self._txt_ip.setText(host)
+            self._spin_port.setValue(port)
             dev = MatrixDevice(
-                name=ip, transport="wifi",
-                address=ip, port=self._spin_port.value(),
+                name=host, transport="wifi",
+                address=host, port=port,
             )
             self._connect(dev)
 
@@ -275,7 +335,7 @@ class ExternalDisplayTab(QWidget):
             self._sender = sender
             self._frame_count = 0
             self._txt_ip.setText(dev.address)
-            self._spin_port.setValue(dev.port)
+            _save_persisted_connection(dev.address, self._spin_port.value(), self._txt_push_ip.text().strip())
             self._set_connected(True, f"Connected  →  {dev.address}:{dev.port}")
             self._btn_connect.setText("Disconnect")
             self._log(f"Connected to {dev.address}:{dev.port}")
@@ -299,6 +359,10 @@ class ExternalDisplayTab(QWidget):
     def _on_auto_toggled(self, enabled: bool):
         self._auto_send = enabled
 
+    def _persist_connection_fields(self):
+        host, port = _parse_host_port(self._txt_ip.text(), self._spin_port.value())
+        _save_persisted_connection(host, port, self._txt_push_ip.text().strip())
+
     # ── Frame streaming (called by main_window on every redraw) ───────────────
 
     def send_frame(self, buf: list) -> None:
@@ -312,43 +376,60 @@ class ExternalDisplayTab(QWidget):
 
     # ── Push Configuration ────────────────────────────────────────────────────
 
+    def _restore_connection_state(self):
+        state = _load_persisted_connection()
+        ip = str(state.get("ip", "") or "")
+        port = int(state.get("port", DATA_PORT) or DATA_PORT)
+        push_ip = str(state.get("push_ip", ip) or "")
+        if ip:
+            host, saved_port = _parse_host_port(ip, port)
+            self._txt_ip.setText(host)
+            self._spin_port.setValue(saved_port)
+            if push_ip:
+                self._txt_push_ip.setText(str(push_ip))
+            else:
+                self._txt_push_ip.setText(host)
+        else:
+            self._spin_port.setValue(port)
+
+    def _connect_connection_persistence(self):
+        self._txt_ip.textChanged.connect(self._persist_connection_fields)
+        self._spin_port.valueChanged.connect(self._persist_connection_fields)
+        self._txt_push_ip.textChanged.connect(self._persist_connection_fields)
+
     def _load_device_ip(self):
-        try:
-            data = json.loads(_DEVICE_IP_FILE.read_text())
-            ip = data.get("ip", "")
-            if ip:
-                self._txt_push_ip.setText(ip)
-        except Exception:
-            pass
+        state = _load_persisted_connection()
+        push_ip = str(state.get("push_ip", state.get("ip", "")) or "")
+        if push_ip:
+            host, _ = _parse_host_port(push_ip, self._spin_port.value())
+            self._txt_push_ip.setText(host)
 
     def _save_device_ip(self, ip: str):
-        try:
-            _DEVICE_IP_FILE.parent.mkdir(parents=True, exist_ok=True)
-            _DEVICE_IP_FILE.write_text(json.dumps({"ip": ip}))
-        except Exception:
-            pass
+        _save_persisted_connection(ip, self._spin_port.value(), self._txt_push_ip.text().strip())
 
-    def _encode_logos(self) -> dict[str, str]:
-        """Return {ICAO: hex_string} for current airlines' logos at 24×24 RGB.
-
-        The hex string is the raw pixel bytes (24*24*3 = 1728 bytes) encoded
-        as lowercase hex.  The ESP32 decodes this and saves it to SPIFFS,
-        bypassing the SSL-broken internet fetch on the device.
-        """
+    def _collect_airline_catalog(self) -> list[tuple[str, str, str]]:
+        """Build a stable airline catalog from the known DB plus current flights."""
         mw = self._main_window
         if not mw:
-            return {}
-        flights = getattr(mw, '_flights', []) or []
-        if not flights:
-            return {}
-        try:
-            from src.api.logos import get_logo
-        except ImportError:
-            return {}
+            return []
 
-        result: dict[str, str] = {}
+        try:
+            from src.api.logos import collect_known_airline_catalog
+        except ImportError:
+            collect_known_airline_catalog = None
+
+        result: list[tuple[str, str, str]] = []
         seen: set[str] = set()
-        for flight in flights[:15]:
+
+        if collect_known_airline_catalog is not None:
+            for icao, iata, name in collect_known_airline_catalog():
+                if icao in seen:
+                    continue
+                seen.add(icao)
+                result.append((icao, iata, name))
+
+        flights = getattr(mw, '_flights', []) or []
+        for flight in flights:
             raw = (getattr(flight, 'airline_icao', '') or "").strip()
             if not raw and len(flight.callsign or "") >= 3:
                 raw = flight.callsign[:3]
@@ -356,8 +437,84 @@ class ExternalDisplayTab(QWidget):
             if len(icao) != 3 or not icao.isalpha() or icao in seen:
                 continue
             seen.add(icao)
+            result.append(
+                (
+                    icao,
+                    (getattr(flight, 'airline_iata', '') or "").strip().upper(),
+                    (getattr(flight, 'airline_name', '') or "").strip(),
+                )
+            )
+        return result
+
+    def _collect_flight_airlines(self) -> list[tuple[str, str, str]]:
+        """Airlines from the currently displayed flights only (no catalog)."""
+        mw = self._main_window
+        if not mw:
+            return []
+        result: list[tuple[str, str, str]] = []
+        seen: set[str] = set()
+        for flight in getattr(mw, '_flights', []) or []:
+            raw = (getattr(flight, 'airline_icao', '') or "").strip()
+            if not raw and len(flight.callsign or "") >= 3:
+                raw = flight.callsign[:3]
+            icao = raw.upper()
+            if len(icao) != 3 or not icao.isalpha() or icao in seen:
+                continue
+            seen.add(icao)
+            result.append(
+                (
+                    icao,
+                    (getattr(flight, 'airline_iata', '') or "").strip().upper(),
+                    (getattr(flight, 'airline_name', '') or "").strip(),
+                )
+            )
+        return result
+
+    def _current_logo_size(self) -> int:
+        """Pixel size (w=h) of the layout's logo block, matching the Python
+        preview exactly — e.g. 40 for the "sq40" format. Falls back to 24
+        (the smallest/default format) if there's no enabled logo block."""
+        mw = self._main_window
+        if not mw:
+            return 24
+        try:
+            blocks = mw._editor.get_layout()
+        except Exception:
+            return 24
+        for b in blocks:
+            if b.key == "logo" and b.enabled:
+                return b.width
+        return 24
+
+    def _encode_logos(self) -> dict[str, str]:
+        """Return {ICAO: hex_string} for currently displayed flights, sized
+        to match the layout's logo block exactly (same pixels the Python app
+        renders — see src/core/renderer.py's _paste_pil).
+
+        The hex string is the raw pixel bytes (size*size*3) encoded as
+        lowercase hex. The ESP32 decodes this and saves it to LittleFS.
+
+        Scoped to the current flights (not the full airline catalog): the
+        POST /config body is parsed into a 64 KB PSRAM buffer on the device
+        (see ft_webserver.cpp), and the full catalog's logos alone hex-encode
+        to ~288 KB — pushing them here would blow that budget and either
+        fail to parse or make the device hang writing ~80+ logo files inside
+        a single request. The full catalog still reaches the device, just
+        via _push_all_logos()'s small batched POST /logos calls afterward.
+        """
+        mw = self._main_window
+        if not mw:
+            return {}
+        try:
+            from src.api.logos import get_logo
+        except ImportError:
+            return {}
+
+        size = self._current_logo_size()
+        result: dict[str, str] = {}
+        for icao, iata, _ in self._collect_flight_airlines():
             try:
-                img = get_logo(getattr(flight, 'airline_iata', '') or '', 24, 24, icao)
+                img = get_logo(iata, size, size, icao)
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
                 result[icao] = img.tobytes().hex()
@@ -366,22 +523,9 @@ class ExternalDisplayTab(QWidget):
         return result
 
     def _collect_airline_names(self) -> dict[str, str]:
-        """Return {ICAO: name} for current airlines from the live flight list."""
-        mw = self._main_window
-        if not mw:
-            return {}
-        flights = getattr(mw, '_flights', []) or []
+        """Return {ICAO: name} for the airline catalog used by the display."""
         result: dict[str, str] = {}
-        seen: set[str] = set()
-        for flight in flights[:15]:
-            raw = (getattr(flight, 'airline_icao', '') or "").strip()
-            if not raw and len(flight.callsign or "") >= 3:
-                raw = flight.callsign[:3]
-            icao = raw.upper()
-            if len(icao) != 3 or not icao.isalpha() or icao in seen:
-                continue
-            seen.add(icao)
-            name = getattr(flight, 'airline_name', '') or ""
+        for icao, _, name in self._collect_airline_catalog():
             if name:
                 result[icao] = name
         return result
@@ -431,7 +575,7 @@ class ExternalDisplayTab(QWidget):
             "display_w":        int(display_w),
             "display_h":        int(display_h),
             "layout":           layout,
-            "logos":            logos,          # {ICAO: hex_string} 24×24 RGB
+            "logos":            logos,          # {ICAO: hex_string} sized to the logo block's format
             "airline_names":    airline_names,  # {ICAO: name}
         }
 
@@ -448,26 +592,85 @@ class ExternalDisplayTab(QWidget):
             return
 
         self._btn_push.setEnabled(False)
+        host, http_port = _parse_host_port(ip, 80)
         n_logos = len(payload.get('logos', {}))
         n_names = len(payload.get('airline_names', {}))
-        self._log(f"Pushing config to http://{ip}/config "
+        self._log(f"Pushing config to http://{host}:{http_port}/config "
                   f"({n_logos} logos, {n_names} airline names) …")
+        logo_size = self._current_logo_size()
 
         def _run():
             try:
                 import requests as req
                 resp = req.post(
-                    f"http://{ip}/config",
+                    f"http://{host}:{http_port}/config",
                     json=payload,
-                    timeout=10,
+                    # clearLogoCache() (device-side) walks and deletes every
+                    # cached logo file before applying the new config — with
+                    # a lot of accumulated files that alone can take longer
+                    # than a typical request. 30s gives it room; a healthy
+                    # device with a small cache still responds in a couple
+                    # of seconds either way.
+                    timeout=30,
                 )
                 ok  = resp.status_code == 200
                 msg = f"HTTP {resp.status_code}: {resp.text[:200].strip()}"
                 self._sig.push_done.emit(ok, msg)
+                if ok:
+                    self._push_all_logos(host, logo_size)
             except Exception as exc:
                 self._sig.push_done.emit(False, str(exc))
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _push_all_logos(self, ip: str, logo_size: int = 24, batch_size: int = 6):
+        """Stream the full known airline catalog to the device in small batches.
+
+        POST /config only carries logos for airlines in the currently
+        displayed flights (see _encode_logos) to stay under the ESP32's
+        64 KB JSON buffer. This follows up with everything else via
+        POST /logos, a handful of airlines per request, so the device ends
+        up with the complete catalog without ever needing a single payload
+        large enough to overflow that buffer. Runs on the caller's thread —
+        call from a background thread, not the GUI thread.
+        """
+        try:
+            from src.api.logos import collect_known_airline_catalog, get_logo
+            import requests as req
+        except ImportError:
+            return
+
+        catalog = collect_known_airline_catalog()
+        total = len(catalog)
+        sent = 0
+        self._sig.log_msg.emit(f"Pushing full logo catalog ({total} airlines) in batches…")
+
+        for i in range(0, total, batch_size):
+            batch = catalog[i:i + batch_size]
+            logos = {}
+            for icao, iata, _ in batch:
+                try:
+                    img = get_logo(iata, logo_size, logo_size, icao)
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    logos[icao] = img.tobytes().hex()
+                except Exception:
+                    continue
+            if not logos:
+                continue
+            try:
+                resp = req.post(f"http://{ip}/logos", json={"logos": logos}, timeout=10)
+                if resp.status_code == 200:
+                    sent += len(logos)
+                else:
+                    self._sig.log_msg.emit(
+                        f"Logo batch failed: HTTP {resp.status_code}"
+                    )
+            except Exception as exc:
+                self._sig.log_msg.emit(f"Logo catalog push aborted: {exc}")
+                return
+
+        self._sig.log_msg.emit(f"Logo catalog push complete — {sent}/{total} airlines sent.")
 
     def _on_push_done(self, success: bool, message: str):
         self._btn_push.setEnabled(True)

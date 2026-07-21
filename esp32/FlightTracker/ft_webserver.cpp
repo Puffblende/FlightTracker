@@ -67,6 +67,68 @@ static void saveLogo(const char* icao, const char* hexStr) {
 }
 
 // ---------------------------------------------------------------------------
+// Delete every cached logo .bin file. Called once per fresh POST /config
+// (not on configLoad() at boot, and not per POST /logos batch) so a new
+// config push always starts from a clean slate — stale logos from a
+// previous push (e.g. an airline's logo changed upstream) never linger
+// alongside the fresh ones streamed in afterwards.
+// ---------------------------------------------------------------------------
+static void clearLogoCache() {
+    File dir = LittleFS.open("/logos");
+    if (!dir) { LittleFS.mkdir("/logos"); return; }
+
+    // Pass 1: collect names only. Removing files while dir's own iterator is
+    // still walking the same directory can desync/hang LittleFS on some
+    // cores — so nothing is deleted until the directory handle is closed.
+    //
+    // Cap sized generously (not 128): the full airline catalog pushed via
+    // _push_all_logos() can leave more logo files than that behind once
+    // multiple sizes/pushes accumulate, and silently under-collecting here
+    // means those files are never enumerated for deletion again — the
+    // directory grows without bound across pushes and every future
+    // clearLogoCache() call gets slower walking it.
+    static char names[512][32];
+    int n = 0;
+    File f;
+    while (n < 512 && (f = dir.openNextFile())) {
+        strncpy(names[n], f.name(), sizeof(names[n]) - 1);
+        names[n][sizeof(names[n]) - 1] = '\0';
+        f.close();
+        n++;
+    }
+    dir.close();
+
+    // Pass 2: delete, now that the directory isn't being iterated. Yield
+    // periodically — deleting hundreds of files back-to-back with no yield
+    // can starve the watchdog task long enough to trigger a reboot.
+    int removed = 0;
+    for (int i = 0; i < n; i++) {
+        String path = names[i];
+        // openNextFile() may return an absolute path on some cores — avoid
+        // doubling the "/logos/" prefix if it already included one.
+        if (!path.startsWith("/")) path = "/logos/" + path;
+        if (LittleFS.remove(path)) removed++;
+        if (i % 10 == 9) delay(1);
+    }
+    Serial.printf("[Logo] Cleared %d cached logo(s)\n", removed);
+}
+
+// ---------------------------------------------------------------------------
+// Save every {ICAO: hex} entry in a "logos" JSON object. Shared by
+// POST /config (logos for currently-visible flights) and POST /logos
+// (batched full-catalog pushes — see handlePostLogos below).
+// ---------------------------------------------------------------------------
+static void saveLogosFromJson(JsonObject logos) {
+    if (logos.isNull()) return;
+    int n = 0;
+    for (JsonPair kv : logos) {
+        const char* hex = kv.value().as<const char*>();
+        if (hex) { saveLogo(kv.key().c_str(), hex); n++; }
+    }
+    if (n) Serial.printf("[Logo] Saved %d logo(s) from push\n", n);
+}
+
+// ---------------------------------------------------------------------------
 // Globals
 // ---------------------------------------------------------------------------
 DeviceConfig gConfig = {};
@@ -173,15 +235,7 @@ static void applyConfigDoc(JsonDocument& doc) {
     gConfig.valid = true;
 
     // Save logos pushed from Python app (hex-encoded 24×24 RGB, key = ICAO)
-    JsonObject logos = doc["logos"];
-    if (!logos.isNull()) {
-        int n = 0;
-        for (JsonPair kv : logos) {
-            const char* hex = kv.value().as<const char*>();
-            if (hex) { saveLogo(kv.key().c_str(), hex); n++; }
-        }
-        if (n) Serial.printf("[Config] Saved %d logos to SPIFFS\n", n);
-    }
+    saveLogosFromJson(doc["logos"]);
 
     // Save airline names pushed from Python app (key = ICAO, value = name)
     JsonObject airlineNames = doc["airline_names"];
@@ -275,9 +329,43 @@ static void handlePostConfig() {
         return;
     }
 
+    // clearLogoCache() used to run here on every push, but saveLogo() already
+    // overwrites a given {ICAO}_{size}.bin in place, so nothing actually
+    // needed the wipe in the common case — and with a large accumulated
+    // cache the walk-and-delete could take long enough to trip the
+    // watchdog and reboot mid-request. Cache clearing is now a deliberate,
+    // separate action via GET /reset-logos, not an automatic side effect
+    // of every config push. This also means a config push no longer
+    // discards the full catalog built up by _push_all_logos() — the device
+    // keeps working with everything it has already learned, even across
+    // pushes, which is what lets it run standalone after a power cycle.
     applyConfigDoc(doc);
     configSave();
 
+    server.send(200, "application/json", "{\"status\":\"ok\"}");
+}
+
+// Accepts {"logos": {ICAO: hex_string, ...}} — a small batch (a handful of
+// airlines) so the doc buffer stays well clear of its 64 KB cap. The Python
+// app calls this repeatedly to stream the full airline catalog after the
+// main /config push, since sending it all in one request would overflow
+// both this buffer and the WebServer's request body handling.
+static void handlePostLogos() {
+    String body = server.arg("plain");
+    if (body.isEmpty()) {
+        server.send(400, "application/json", "{\"error\":\"empty body\"}");
+        return;
+    }
+
+    BasicJsonDocument<_FtSpiRam> doc(65536);
+    auto err = deserializeJson(doc, body);
+    if (err) {
+        Serial.printf("[Logos] JSON parse error: %s\n", err.c_str());
+        server.send(400, "application/json", "{\"error\":\"invalid JSON\"}");
+        return;
+    }
+
+    saveLogosFromJson(doc["logos"]);
     server.send(200, "application/json", "{\"status\":\"ok\"}");
 }
 
@@ -291,6 +379,14 @@ static void handleGetStatus() {
     String out;
     serializeJson(doc, out);
     server.send(200, "application/json", out);
+}
+
+// Manual, deliberate cache wipe — visit this URL (or curl it) when stale
+// logos need clearing out. Not called automatically by POST /config
+// anymore; see the comment there for why.
+static void handleResetLogos() {
+    clearLogoCache();
+    server.send(200, "application/json", "{\"status\":\"ok\"}");
 }
 
 static void handleNotFound() {
@@ -324,8 +420,10 @@ static void handleResetWifi() {
 void webserverBegin() {
     server.on("/",           HTTP_GET,  handleRoot);
     server.on("/config",     HTTP_POST, handlePostConfig);
+    server.on("/logos",      HTTP_POST, handlePostLogos);
     server.on("/status",     HTTP_GET,  handleGetStatus);
     server.on("/reset-wifi", HTTP_GET,  handleResetWifi);
+    server.on("/reset-logos", HTTP_GET, handleResetLogos);
     server.onNotFound(handleNotFound);
     server.begin();
 }

@@ -4,7 +4,9 @@
       "Bash(grep -E \"\\\\.\\(py|json|txt|md|yaml|yml\\)$\")",
       "Bash(timeout 5 python3 main.py)",
       "Bash(python -c \"from src.ui.external_tab import ExternalDisplayTab; print\\('import ok'\\)\")",
-      "Bash(python3 -c \"from src.ui.external_tab import ExternalDisplayTab; print\\('import ok'\\)\")"
+      "Bash(python3 -c \"from src.ui.external_tab import ExternalDisplayTab; print\\('import ok'\\)\")",
+      "Bash(python -m pytest tests/test_preset_loading.py -v)",
+      "Bash(pip3 show *)"
     ]
   }
 }

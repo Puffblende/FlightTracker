@@ -1,20 +1,20 @@
 """Application-wide dark theme stylesheet and style helpers."""
 from __future__ import annotations
 
-# Accent / surface tokens — light theme
-ACCENT      = "#3878d0"
-ACCENT_DIM  = "#5b9bf2"
-ACCENT_GLOW = "#1f4a8a"
-BG          = "#ffffff"
-SURFACE     = "#f5f5f5"
-SURFACE2    = "#eaeaea"
-BORDER      = "#d8d8d8"
-BORDER2     = "#c4c4c4"
-TEXT        = "#1f1f1f"
-TEXT_DIM    = "#666666"
-TEXT_MUTED  = "#999999"
-DANGER      = "#c0392b"
-DANGER_DIM  = "#ec8472"
+# Accent / surface tokens — dark theme
+ACCENT      = "#4f9cff"
+ACCENT_DIM  = "#77b4ff"
+ACCENT_GLOW = "#1d4f8f"
+BG          = "#0f1115"
+SURFACE     = "#161a22"
+SURFACE2    = "#1f2430"
+BORDER      = "#2b3140"
+BORDER2     = "#394253"
+TEXT        = "#f3f6fb"
+TEXT_DIM    = "#9aa4b2"
+TEXT_MUTED  = "#6f7a8c"
+DANGER      = "#ff6b6b"
+DANGER_DIM  = "#ff8b8b"
 
 
 STYLESHEET = f"""
@@ -65,9 +65,9 @@ QPushButton {{
     font-size: 12px;
 }}
 QPushButton:hover {{
-    background: #f0f0f0;
-    border-color: #a8a8a8;
-    color: #000000;
+    background: {SURFACE2};
+    border-color: #5c6884;
+    color: {TEXT};
 }}
 QPushButton:pressed {{
     background: {SURFACE2};
@@ -104,7 +104,7 @@ QPushButton[role="danger"]:hover {{
 
 /* ── Inputs ─────────────────────────────────────────────────────── */
 QLineEdit, QSpinBox, QDoubleSpinBox, QTextEdit {{
-    background: #ffffff;
+    background: {SURFACE2};
     border: 1px solid {BORDER2};
     border-radius: 7px;
     padding: 4px 10px;
@@ -114,7 +114,7 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QTextEdit {{
 }}
 QLineEdit:focus, QSpinBox:focus {{
     border-color: {ACCENT};
-    background: #fbfbfb;
+    background: {SURFACE};
 }}
 QLineEdit[readOnly="true"] {{
     color: {TEXT_DIM};
@@ -130,7 +130,7 @@ QSpinBox::up-button, QSpinBox::down-button {{
 
 /* ── ComboBox ───────────────────────────────────────────────────── */
 QComboBox {{
-    background: #ffffff;
+    background: {SURFACE2};
     border: 1px solid {BORDER2};
     border-radius: 7px;
     padding: 4px 10px;
@@ -151,7 +151,7 @@ QComboBox::down-arrow {{
     margin-right:  8px;
 }}
 QComboBox QAbstractItemView {{
-    background: #ffffff;
+    background: {SURFACE2};
     border: 1px solid {BORDER2};
     border-radius: 7px;
     selection-background-color: {ACCENT};
@@ -239,7 +239,7 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
 
 /* ── Lists ──────────────────────────────────────────────────────── */
 QListWidget {{
-    background: #ffffff;
+    background: {SURFACE2};
     border: 1px solid {BORDER};
     border-radius: 8px;
     color: {TEXT};
@@ -267,7 +267,7 @@ QCheckBox::indicator {{
     width: 16px; height: 16px;
     border: 1px solid {BORDER2};
     border-radius: 5px;
-    background: #ffffff;
+    background: {SURFACE2};
 }}
 QCheckBox::indicator:hover {{ border-color: #888888; }}
 QCheckBox::indicator:checked {{
@@ -289,9 +289,9 @@ QStatusBar QLabel {{
 
 /* ── Tooltips ───────────────────────────────────────────────────── */
 QToolTip {{
-    background: #fafafa;
-    color: #1f1f1f;
-    border: 1px solid #c4c4c4;
+    background: {SURFACE};
+    color: {TEXT};
+    border: 1px solid {BORDER};
     border-radius: 5px;
     padding: 5px 9px;
     font-size: 11px;

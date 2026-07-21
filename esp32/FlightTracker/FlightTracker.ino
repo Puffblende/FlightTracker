@@ -205,12 +205,9 @@ static void fetchTask(void* /*param*/) {
                       gConfig.lat, gConfig.lon, gConfig.radius_km,
                       (unsigned long)ESP.getFreeHeap());
 
-        // Signal logo task to back off during the network call
-        g_fetchingFlights = true;
         int n = fetchFlights(gConfig.lat, gConfig.lon, gConfig.radius_km,
                              gConfig.opensky_user, gConfig.opensky_pass,
                              tmp, MAX_FLIGHTS);
-        g_fetchingFlights = false;
 
         // Commit results — brief mutex hold
         if (xSemaphoreTake(s_flightMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
@@ -335,7 +332,6 @@ void setup() {
         gConfig.cycle_interval_ms = DEFAULT_CYCLE_MS;
     }
 
-    logosInit();
     airlinesInit();
     webserverBegin();
     udpDisc.begin(UDP_DISC_PORT);
