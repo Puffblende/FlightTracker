@@ -3,7 +3,7 @@
 Real-time ADS-B flight tracker with an 80×40 LED matrix display simulation.
 Shows nearby aircraft on a pixel-accurate LED panel — and can drive a real 80×40 matrix later.
 
-![LED Display Preview](https://i.imgur.com/placeholder.png)
+![LED Display Preview](https://i.ibb.co/xtSxhry3/Bildschirmfoto-2026-07-26-um-14-40-36.png)
 
 ---
 
