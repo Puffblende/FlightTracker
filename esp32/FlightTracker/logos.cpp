@@ -10,21 +10,24 @@ static const int MAX_LOGO_SIZE = 40;
 // Fallback: generic top-down aircraft silhouette
 // ---------------------------------------------------------------------------
 
+// Pointed nose → tapering fuselage → diamond-shaped swept wings that peak
+// at full width for one row → straight fuselage → a clearly smaller tail
+// stabilizer → tapered tail. Mirrors _PLANE_16 in src/api/logos.py exactly.
 static const uint16_t PLANE_16[16] = {
     0x0180,  // nose tip
-    0x03C0,
-    0x03C0,
-    0x03C0,
-    0x3FFC,  // wings
-    0x7FFE,
-    0x3FFC,
-    0x03C0,
-    0x03C0,
-    0x03C0,
-    0x03C0,
     0x0180,
-    0x03C0,  // horizontal stabilizers
-    0x0FF0,
+    0x03C0,
+    0x03C0,
+    0x03C0,
+    0x0FF0,  // wings ramping up
+    0x3FFC,
+    0xFFFF,  // full wingspan
+    0x3FFC,  // wings ramping down
+    0x03C0,
+    0x03C0,
+    0x03C0,
+    0x0FF0,  // tail stabilizer — smaller than the main wings
+    0x03C0,
     0x03C0,
     0x0180,  // tail tip
 };
@@ -64,9 +67,11 @@ void drawLogo(const char* icao, int x, int y, int size,
 
     File f = LittleFS.open(path, "r");
     if (!f) {
+        Serial.printf("[Logo] MISS %s (not cached at this size) — drawing fallback icon\n", path);
         drawPlaneIcon(x, y, size, r, g, b);
         return;
     }
+    Serial.printf("[Logo] HIT %s\n", path);
 
     uint8_t header = 0;
     f.read(&header, 1);  // skip reserved byte

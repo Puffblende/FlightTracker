@@ -113,6 +113,7 @@ BLOCK_FORMATS: dict[str, list[FormatSpec]] = {
         FormatSpec("arr",   "LAX  (arrival)",    3, "", ""),
     ],
     "aircraft_type": [
+        FormatSpec("auto", "BOEING 737-800 → 737-800 → B738  (best fit)", 16, "", ""),
         FormatSpec("code", "B738  (ICAO code)",        4,  "", ""),
         FormatSpec("short", "B738  (short type)",      4,  "", ""),
         FormatSpec("manufacturer", "BOEING  (manufacturer)", 7, "", ""),
@@ -280,6 +281,8 @@ class LayoutBlock:
             return _LOGO_SIZES.get(self.fmt, 24)
         if self.key == "progress":
             return max(4, int(self.custom_width)) if self.custom_width else 40
+        if self.key == "aircraft_type" and self.fmt == "auto" and self.custom_width:
+            return max(4, int(self.custom_width))
         n = max(1, self.text_char_count)
         char_w_scaled = max(1, int(round(CHAR_W * self.font_scale)))
         spacing_scaled = max(0, int(round(CHAR_SPACING * self.font_scale)))
@@ -428,20 +431,45 @@ def value_aircraft_type(flight, fmt_id: str) -> str:
 
     from src.core.aircraft_types import lookup_type
 
+    # lookup_type() only covers the entries in aircraft_types.py — for a
+    # type it doesn't recognize, fall back to the short ICAO code rather
+    # than silently returning nothing.
     full = lookup_type(typ) or ""
     if fmt_id == "full":
-        return full.upper()
+        return full.upper() if full else typ[:4].upper()
     if fmt_id == "manufacturer":
+        if not full:
+            return typ[:4].upper()
         parts = full.split(" ", 1)
-        return parts[0].upper() if parts else ""
+        return parts[0].upper() if parts else typ[:4].upper()
     if fmt_id == "model":
         if not full:
-            return ""
+            return typ[:4].upper()
         parts = full.split(" ", 1)
         return parts[1].upper() if len(parts) > 1 else full.upper()
     if fmt_id == "short":
         return typ[:4].upper()
     return typ[:4].upper()
+
+
+def value_aircraft_type_auto(flight, block: "LayoutBlock") -> str:
+    """Pick the longest aircraft-type representation that actually fits the
+    block's pixel width — full name, then model, then manufacturer, then the
+    short ICAO code — instead of hard-clipping a long name mid-word."""
+    char_w = max(1, round(CHAR_W * block.font_scale))
+    spacing = max(0, round(CHAR_SPACING * block.font_scale))
+
+    def px(n_chars: int) -> int:
+        return n_chars * (char_w + spacing) - spacing if n_chars > 0 else 0
+
+    reserved = px(len(block.effective_label)) + px(len(block.effective_unit))
+    budget = max(0, block.width - reserved)
+
+    for fmt_id in ("full", "model", "manufacturer", "short"):
+        v = value_aircraft_type(flight, fmt_id)
+        if v and not _is_placeholder(v) and px(len(v)) <= budget:
+            return v
+    return value_aircraft_type(flight, "short")
 
 
 def value_squawk(flight, _fmt_id: str) -> str:
@@ -474,7 +502,8 @@ def render_block_text(block: LayoutBlock, flight: Flight) -> str:
     elif key == "route":       v = value_route(flight, fmt)
     elif key == "airline":     v = value_airline(flight, fmt)
     elif key == "callsign":    v = value_callsign(flight, fmt)
-    elif key == "aircraft_type": v = value_aircraft_type(flight, fmt)
+    elif key == "aircraft_type":
+        v = value_aircraft_type_auto(flight, block) if fmt == "auto" else value_aircraft_type(flight, fmt)
     elif key == "squawk":      v = value_squawk(flight, fmt)
     elif key == "country":     v = value_country(flight, fmt)
     else:

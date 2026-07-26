@@ -843,7 +843,13 @@ class MainWindow(QMainWindow):
         from src.api.flights import fetch_aircraft_type
         from src.api.routes import lookup_route
         changed = False
-        for f in flights[:10]:
+        print(f"[Enrich] starting for {len(flights)} flight(s): "
+              f"{[f.display_callsign for f in flights]}")
+        # Every flight gets enriched, not just the first 10 — lookup_route()
+        # rate-limits and caches internally, so this stays cheap even for a
+        # busy area, and it's what was silently leaving the progress bar
+        # (which needs origin/destination) empty for anything past #10.
+        for f in flights:
             if not f.aircraft_type:
                 f.aircraft_type = fetch_aircraft_type(
                     f.icao24, self._os_user, self._os_pass
@@ -857,6 +863,7 @@ class MainWindow(QMainWindow):
                     f.origin_icao      = f.origin_icao      or o_icao
                     f.destination_icao = f.destination_icao or d_icao
                     changed = True
+        print(f"[Enrich] done, changed={changed}")
         if changed:
             self._worker.flights_enriched.emit()
 

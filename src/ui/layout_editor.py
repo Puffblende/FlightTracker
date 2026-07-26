@@ -353,10 +353,12 @@ class CustomizationPanel(QGroupBox):
         row2.addStretch()
         root.addLayout(row2)
 
-        # Row 3: progress controls
+        # Row 3: progress controls (width spinner is also reused for
+        # aircraft_type's "auto" best-fit format — see show_block())
         prog = QHBoxLayout()
         prog.setSpacing(8)
-        prog.addWidget(QLabel("Width:"))
+        self.width_lbl = QLabel("Width:")
+        prog.addWidget(self.width_lbl)
         self.width_spin = QSpinBox()
         self.width_spin.setRange(4, 256)
         self.width_spin.setSuffix(" px")
@@ -451,9 +453,13 @@ class CustomizationPanel(QGroupBox):
             self.unit_edit.setText(block.effective_unit if block.has_unit else "")
 
             is_prog = block.key == "progress"
-            self._prog_widget.setVisible(is_prog)
-            if is_prog:
+            is_auto_actype = block.key == "aircraft_type" and block.fmt == "auto"
+            self._prog_widget.setVisible(is_prog or is_auto_actype)
+            self.cb_remaining.setVisible(is_prog)
+            self.cb_endpoints.setVisible(is_prog)
+            if is_prog or is_auto_actype:
                 self.width_spin.setValue(block.custom_width or block.width)
+            if is_prog:
                 self.cb_remaining.setChecked(block.show_remaining)
                 self.cb_endpoints.setChecked(block.show_endpoints)
                 self.font_spin.setEnabled(False)

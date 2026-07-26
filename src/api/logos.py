@@ -20,24 +20,30 @@ _lock = threading.Lock()
 _memory: dict = {}          # cache_key -> Image.Image | None
 _HEADERS = {"User-Agent": "FlightTracker/1.0"}
 
-# 16×16 pixel-art top-down plane (1 = lit, 0 = off)
+# 16×16 pixel-art top-down plane (1 = lit, 0 = off).
+# Pointed nose → tapering fuselage → diamond-shaped swept wings that peak
+# at full width for one row → straight fuselage → a clearly smaller tail
+# stabilizer → tapered tail. Keeping the wing peak to a single row (instead
+# of a thick flat bar) and making the tail visibly smaller than the main
+# wings is what makes this read as a plane instead of two identical flares
+# joined by a straight shaft.
 _PLANE_16 = [
     [0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0],
-    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
-    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0],
-    [0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0],
+    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
+    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
+    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
+    [0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0],
+    [0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0],
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-    [0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0],
+    [0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0],
+    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
+    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
+    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
+    [0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0],
+    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
+    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
     [0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0],
-    [0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0],
-    [0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0],
-    [0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0],
-    [0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0],
-    [0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0],
-    [0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0],
-    [0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0],
-    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
 ]
 
 
@@ -114,22 +120,29 @@ def _needs_white_background(img: Image.Image) -> bool:
 
 
 def _composite_on_white(img: Image.Image, w: int, h: int) -> Image.Image:
-    """Flatten transparency onto white only when the source likely needs it."""
+    """Flatten transparency before resizing.
+
+    Always composites onto a real background — white when the source
+    likely needs it to stay readable, black (matching the LED panel)
+    otherwise. Never do a bare RGBA->RGB convert: Pillow keeps whatever
+    leftover RGB values sat behind fully-transparent pixels (arbitrary
+    palette residue, never meant to be shown), which shows up as
+    unrelated colors bleeding through once alpha is discarded — e.g. a
+    DHL logo picking up a stray green background from "transparent"
+    pixels that were never actually white or black.
+    """
     if img.mode == "P":
         img = img.convert("RGBA")
     if img.mode in ("RGBA", "LA"):
-        if _needs_white_background(img):
-            bg = Image.new("RGB", img.size, (255, 255, 255))
-            mask = img.split()[-1]
-            bg.paste(img.convert("RGB"), mask=mask)
-            img = bg
-        else:
-            img = img.convert("RGBA")
+        img = img.convert("RGBA")
+        bg_color = (255, 255, 255) if _needs_white_background(img) else (0, 0, 0)
+        bg = Image.new("RGB", img.size, bg_color)
+        mask = img.split()[-1]
+        bg.paste(img.convert("RGB"), mask=mask)
+        img = bg
     else:
         img = img.convert("RGB")
 
-    if img.mode == "RGBA":
-        img = img.convert("RGB")
     return img.resize((w, h), Image.Resampling.LANCZOS)
 
 

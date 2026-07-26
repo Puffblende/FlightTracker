@@ -32,6 +32,8 @@
 #include "provisioning.h"
 #include "logos.h"
 #include "airlines.h"
+#include "routes.h"
+#include "aircraft_types.h"
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -209,6 +211,21 @@ static void fetchTask(void* /*param*/) {
                              gConfig.opensky_user, gConfig.opensky_pass,
                              tmp, MAX_FLIGHTS);
 
+        // Route (origin/destination) isn't in any state-vector source we
+        // use (OpenSky, adsb.lol) — only adsb.fi's fallback path includes
+        // it, which is rarely reached. Look it up separately per callsign,
+        // same as the Python app's src/api/routes.py, via a small per-cycle
+        // budget so a batch of new flights doesn't stall this fetch cycle.
+        if (n > 0) {
+            routeLookupBudgetReset();
+            for (int i = 0; i < n; i++) {
+                if (tmp[i].origin[0] && tmp[i].destination[0]) continue;
+                if (!tmp[i].callsign[0]) continue;
+                routeLookup(tmp[i].callsign, tmp[i].origin, tmp[i].destination,
+                            tmp[i].dep_icao, tmp[i].arr_icao);
+            }
+        }
+
         // Commit results — brief mutex hold
         if (xSemaphoreTake(s_flightMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
             lastFetchMs = millis();
@@ -246,6 +263,7 @@ void setup() {
     if (!LittleFS.begin(true)) {
         Serial.println("LittleFS mount failed");
     }
+    routesInit();
 
     // Allocate flight array from PSRAM — frees ~14 KB of regular heap for SSL
     flights = (FlightData*)heap_caps_malloc(MAX_FLIGHTS * sizeof(FlightData),
