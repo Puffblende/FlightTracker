@@ -4,6 +4,8 @@
 
 #include "renderer.h"   // LayoutBlock
 #include <stdint.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 // ---------------------------------------------------------------------------
 // Runtime configuration (populated from POST /config or loaded from flash)
@@ -23,7 +25,19 @@ struct DeviceConfig {
 
 extern DeviceConfig gConfig;
 
-// Persist / restore config from LittleFS (CONFIG_PATH = "/config.json")
+// Guards gConfig against the same cross-task hazard fs_lock.h protects
+// LittleFS against: fetchTask() (its own core) reads lat/lon/radius/creds
+// every fetch cycle, while a POST /config push (main loop) can rewrite all
+// of it at any moment. Without this, fetchTask could read a lat from before
+// a push and a lon from after it (torn read across a multi-field struct) —
+// lower-impact than the LittleFS race (self-corrects next cycle rather than
+// corrupting anything on disk), but the same class of bug, so closed the
+// same way. Take it around any block that reads or writes more than one
+// gConfig field where the fields need to be mutually consistent.
+extern SemaphoreHandle_t gConfigMutex;
+void configMutexInit();
+
+// Persist / restore config from NVS (survives a LittleFS reformat)
 bool configSave();
 bool configLoad();
 

@@ -51,7 +51,6 @@
 // ---------------------------------------------------------------------------
 #define MAX_FLIGHTS    64
 #define MAX_BLOCKS     24
-#define CONFIG_PATH    "/config.json"
 
 // Default intervals (ms) if no config loaded
 #define DEFAULT_FETCH_MS  30000u

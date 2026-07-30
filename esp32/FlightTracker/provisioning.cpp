@@ -6,12 +6,12 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <Preferences.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <string.h>
 
-#define WIFI_JSON_PATH "/wifi.json"
-#define AP_SSID        "FlightTracker-Setup"
+#define AP_SSID "FlightTracker-Setup"
 
 static const IPAddress AP_IP(192, 168, 4, 1);
 static const IPAddress AP_MASK(255, 255, 255, 0);
@@ -21,40 +21,78 @@ static DNSServer dnsServer;
 static volatile bool shouldRestart = false;
 
 // ---------------------------------------------------------------------------
-// Credential persistence
+// Credential persistence — NVS (ESP32 Preferences), not LittleFS.
+//
+// NVS lives in its own flash partition, entirely separate from LittleFS.
+// Credentials used to live in /wifi.json on LittleFS, which meant that any
+// LittleFS mount failure — corruption, an interrupted write, anything that
+// makes LittleFS.begin(true) silently reformat on boot — wiped WiFi creds
+// right along with the logo/route caches, forcing a full physical
+// re-provisioning even though nothing about the WiFi connection itself was
+// ever wrong. Keeping credentials in NVS means a LittleFS wipe can no longer
+// take the network connection down with it.
 // ---------------------------------------------------------------------------
+#define NVS_NAMESPACE  "ft-wifi"
+#define LEGACY_WIFI_JSON_PATH "/wifi.json"
+
+static bool wifiCredsSave(const char* ssid, const char* pass);
 
 bool wifiCredsLoad(char* outSsid, int ssidLen, char* outPass, int passLen) {
     outSsid[0] = outPass[0] = '\0';
-    if (!LittleFS.exists(WIFI_JSON_PATH)) return false;
-    File f = LittleFS.open(WIFI_JSON_PATH, "r");
-    if (!f) return false;
+    Preferences prefs;
+    if (prefs.begin(NVS_NAMESPACE, true)) {  // read-only
+        String ssid = prefs.getString("ssid", "");
+        String pass = prefs.getString("pass", "");
+        prefs.end();
+        if (!ssid.isEmpty()) {
+            strncpy(outSsid, ssid.c_str(), ssidLen - 1);
+            outSsid[ssidLen - 1] = '\0';
+            strncpy(outPass, pass.c_str(), passLen - 1);
+            outPass[passLen - 1] = '\0';
+            return true;
+        }
+    }
 
-    DynamicJsonDocument doc(512);
-    auto err = deserializeJson(doc, f);
-    f.close();
-    if (err) return false;
-
-    const char* s = doc["ssid"] | "";
-    const char* p = doc["pass"] | "";
-    if (!s[0]) return false;
-
-    strncpy(outSsid, s, ssidLen - 1);
-    strncpy(outPass, p, passLen - 1);
-    return true;
+    // One-time migration: NVS is empty, which is what every device coming
+    // from firmware that stored credentials in /wifi.json on LittleFS will
+    // see on its first boot after this update. Adopt the old file instead
+    // of forcing a physical re-provisioning purely because of where the
+    // bytes happen to live — this is the one place LittleFS is still the
+    // right thing to read here.
+    if (LittleFS.exists(LEGACY_WIFI_JSON_PATH)) {
+        File f = LittleFS.open(LEGACY_WIFI_JSON_PATH, "r");
+        if (f) {
+            DynamicJsonDocument doc(512);
+            auto err = deserializeJson(doc, f);
+            f.close();
+            if (!err) {
+                const char* s = doc["ssid"] | "";
+                const char* p = doc["pass"] | "";
+                if (s[0]) {
+                    Serial.println("[WiFi] Migrating credentials from legacy /wifi.json to NVS");
+                    wifiCredsSave(s, p);
+                    LittleFS.remove(LEGACY_WIFI_JSON_PATH);
+                    strncpy(outSsid, s, ssidLen - 1);
+                    outSsid[ssidLen - 1] = '\0';
+                    strncpy(outPass, p, passLen - 1);
+                    outPass[passLen - 1] = '\0';
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 static bool wifiCredsSave(const char* ssid, const char* pass) {
-    DynamicJsonDocument doc(512);
-    doc["ssid"] = ssid;
-    doc["pass"] = pass;
-    File f = LittleFS.open(WIFI_JSON_PATH, "w");
-    if (!f) {
-        Serial.println("[WiFi] ERROR: cannot open wifi.json for write");
+    Preferences prefs;
+    if (!prefs.begin(NVS_NAMESPACE, false)) {
+        Serial.println("[WiFi] ERROR: cannot open NVS namespace for write");
         return false;
     }
-    serializeJson(doc, f);
-    f.close();
+    prefs.putString("ssid", ssid);
+    prefs.putString("pass", pass);
+    prefs.end();
 
     // Immediate read-back verify — confirms the write survived a crash/power loss
     char testSsid[64] = {0}, testPass[64] = {0};
@@ -64,7 +102,11 @@ static bool wifiCredsSave(const char* ssid, const char* pass) {
 }
 
 void wifiCredsClear() {
-    LittleFS.remove(WIFI_JSON_PATH);
+    Preferences prefs;
+    if (prefs.begin(NVS_NAMESPACE, false)) {
+        prefs.clear();
+        prefs.end();
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QColorDialog, QLineEdit, QGroupBox, QGraphicsItem, QAbstractScrollArea,
 )
 from PyQt6.QtCore import Qt, QPointF, pyqtSignal
-from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPixmap, QImage
+from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPixmap, QImage, QCursor
 
 from src.core.models import (
     LayoutBlock, BLOCK_TYPES, BLOCK_FORMATS, default_layout, Flight,
@@ -159,8 +159,17 @@ def _render_progress_to_pixmap(block: LayoutBlock, grid_scale: int) -> QPixmap:
 
 # ── Canvas block item ─────────────────────────────────────────────────────────
 
+EDGE_HANDLE_PX = 6  # scene-pixel hit zone near a block's left/right edge
+
+
 class BlockItem(QGraphicsRectItem):
-    """Draggable rectangle on the canvas, with the actual bitmap-font preview."""
+    """Draggable rectangle on the canvas, with the actual bitmap-font preview.
+
+    Also supports resizing by dragging the left or right edge (any block
+    except "logo", which only has discrete sq16/24/32/40 sizes) — hover near
+    an edge for a resize cursor, drag to change custom_width. The rendered
+    content is re-clipped to the new width once the drag is released (see
+    LayoutEditorWidget._emit(), which rebuilds the selected item)."""
 
     def __init__(self, block: LayoutBlock, flight: Flight | None,
                  grid_scale: int, panel_w: int, panel_h: int, on_select):
@@ -170,6 +179,9 @@ class BlockItem(QGraphicsRectItem):
         self._ph = panel_h
         self._on_select = on_select
         self._dragging = False
+        self._resizable = block.key != "logo"
+        self._resizing = False
+        self._resize_edge: str | None = None
 
         w = max(1, block.width) * grid_scale
         h = max(1, block.height) * grid_scale
@@ -183,7 +195,28 @@ class BlockItem(QGraphicsRectItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
+        if self._resizable:
+            self.setAcceptHoverEvents(True)
         self.setToolTip(f"{block.label}  ({block.width}×{block.height} px)")
+
+    def _edge_at(self, local_x: float) -> str | None:
+        w = self.rect().width()
+        if local_x <= EDGE_HANDLE_PX:
+            return "left"
+        if local_x >= w - EDGE_HANDLE_PX:
+            return "right"
+        return None
+
+    def hoverMoveEvent(self, event):
+        if self._resizable and self._edge_at(event.pos().x()):
+            self.setCursor(QCursor(Qt.CursorShape.SizeHorCursor))
+        else:
+            self.unsetCursor()
+        super().hoverMoveEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self.unsetCursor()
+        super().hoverLeaveEvent(event)
 
         # Pixmap of the actual rendered content
         pixmap = self._build_pixmap(flight)
@@ -212,15 +245,58 @@ class BlockItem(QGraphicsRectItem):
                                        max_led_px=block.width)
 
     def mousePressEvent(self, event):
+        if self._on_select:
+            self._on_select(self.block.key)
+
+        edge = self._edge_at(event.pos().x()) if self._resizable else None
+        if edge:
+            # Handle resize entirely ourselves — don't chain to super(),
+            # which would start Qt's built-in move-drag for the same press.
+            self._resizing = True
+            self._resize_edge = edge
+            self._resize_start_scene_x = event.scenePos().x()
+            self._resize_start_w = self.rect().width()
+            self._resize_start_item_x = self.pos().x()
+            event.accept()
+            return
+
         # Track drag state so the editor skips rebuilds while the user is
         # holding the mouse — otherwise a flight-cycle tick would swap the
         # item out from under the drag and snap the block back to (0, 0).
         self._dragging = True
-        if self._on_select:
-            self._on_select(self.block.key)
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event):
+        if not self._resizing:
+            super().mouseMoveEvent(event)
+            return
+
+        gs = self._gs
+        min_w = 4 * gs
+        delta = event.scenePos().x() - self._resize_start_scene_x
+
+        if self._resize_edge == "right":
+            new_w = self._resize_start_w + delta
+            new_w = round(new_w / gs) * gs
+            new_w = max(min_w, min(new_w, self._pw - self._resize_start_item_x))
+            self.setRect(0, 0, new_w, self.rect().height())
+        else:  # "left" — right edge stays fixed, x and width move together
+            right_edge = self._resize_start_item_x + self._resize_start_w
+            new_x = self._resize_start_item_x + delta
+            new_x = round(new_x / gs) * gs
+            new_x = max(0, min(new_x, right_edge - min_w))
+            new_w = right_edge - new_x
+            self.setPos(new_x, self.pos().y())
+            self.setRect(0, 0, new_w, self.rect().height())
+        event.accept()
+
     def mouseReleaseEvent(self, event):
+        if self._resizing:
+            self._resizing = False
+            self._resize_edge = None
+            self.block.custom_width = max(4, round(self.rect().width() / self._gs))
+            event.accept()
+            return
         self._dragging = False
         super().mouseReleaseEvent(event)
 
@@ -864,4 +940,13 @@ class LayoutEditorWidget(QWidget):
 
     def _emit(self):
         self._sync_positions()
+        if self._selected_key:
+            block = next((b for b in self._blocks if b.key == self._selected_key), None)
+            if block:
+                # Rebuilds the item so its preview pixmap re-clips to
+                # block.width — covers both a just-finished edge-drag resize
+                # (custom_width changed) and keeps the width spinner (for
+                # progress / aircraft_type "auto") in sync either way.
+                self._rebuild_item(block)
+                self._custom.show_block(block)
         self.layout_changed.emit(list(self._blocks))

@@ -3,7 +3,7 @@
  *
  * Boot sequence:
  *   1. Init HUB75 panel
- *   2. Load /wifi.json — try to connect (10 s timeout)
+ *   2. Load WiFi credentials from NVS — try to connect (10 s timeout)
  *      If no credentials or timeout → AP provisioning mode (captive portal)
  *   3. Connect to WiFi → show IP on panel
  *   3. Load config from LittleFS (if saved from previous session)
@@ -34,11 +34,13 @@
 #include "airlines.h"
 #include "routes.h"
 #include "aircraft_types.h"
+#include "fs_lock.h"
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <WiFiUdp.h>
 #include <LittleFS.h>
+#include <Preferences.h>
 #include <string.h>
 
 // ---------------------------------------------------------------------------
@@ -66,7 +68,7 @@ static WiFiUDP udpFrame;  // port 4211 — Option A pre-rendered frames
 // WiFi connection
 //
 // Priority order:
-//   1. Credentials in /wifi.json (saved by captive portal or /reset-wifi flow)
+//   1. Credentials in NVS (saved by captive portal or /reset-wifi flow)
 //   2. Compile-time WIFI_SSID / WIFI_PASS from config.h (if not placeholder)
 //   3. Provisioning mode — AP + captive portal (never returns; restarts)
 // ---------------------------------------------------------------------------
@@ -172,14 +174,34 @@ static void fetchTask(void* /*param*/) {
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
 
-        if (!gConfig.valid) continue;
+        // Snapshot the gConfig fields this cycle needs while holding
+        // gConfigMutex — a POST /config push (main loop, different core)
+        // can rewrite gConfig at any moment, and reading its fields one by
+        // one without a lock risks a torn read (e.g. a lat from before a
+        // push paired with a lon from after it). Everything below uses
+        // these local copies, never gConfig directly. See ft_webserver.h.
+        bool cfgValid = false;
+        float cfgLat = 0, cfgLon = 0, cfgRadius = 0;
+        uint32_t cfgFetchMs = 0;
+        char cfgUser[64] = {0}, cfgPass[64] = {0};
+        if (gConfigMutex && xSemaphoreTake(gConfigMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+            cfgValid   = gConfig.valid;
+            cfgLat     = gConfig.lat;
+            cfgLon     = gConfig.lon;
+            cfgRadius  = gConfig.radius_km;
+            cfgFetchMs = gConfig.fetch_interval_ms;
+            strncpy(cfgUser, gConfig.opensky_user, sizeof(cfgUser) - 1);
+            strncpy(cfgPass, gConfig.opensky_pass, sizeof(cfgPass) - 1);
+            xSemaphoreGive(gConfigMutex);
+        }
+        if (!cfgValid) continue;
 
         // Read timing state — brief mutex hold
         uint32_t effectiveMs = 0;
         bool due = false;
         if (xSemaphoreTake(s_flightMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
             effectiveMs = rateLimitIntervalMs > 0 ? rateLimitIntervalMs
-                                                  : gConfig.fetch_interval_ms;
+                                                  : cfgFetchMs;
             due = (lastFetchMs == 0) || (millis() - lastFetchMs >= effectiveMs);
             xSemaphoreGive(s_flightMutex);
         }
@@ -204,11 +226,9 @@ static void fetchTask(void* /*param*/) {
         if (!tmp) { Serial.println("[Fetch] alloc failed"); continue; }
 
         Serial.printf("[Fetch] lat=%.4f lon=%.4f radius=%.1f heap=%lu\n",
-                      gConfig.lat, gConfig.lon, gConfig.radius_km,
-                      (unsigned long)ESP.getFreeHeap());
+                      cfgLat, cfgLon, cfgRadius, (unsigned long)ESP.getFreeHeap());
 
-        int n = fetchFlights(gConfig.lat, gConfig.lon, gConfig.radius_km,
-                             gConfig.opensky_user, gConfig.opensky_pass,
+        int n = fetchFlights(cfgLat, cfgLon, cfgRadius, cfgUser, cfgPass,
                              tmp, MAX_FLIGHTS);
 
         // Route (origin/destination) isn't in any state-vector source we
@@ -232,7 +252,7 @@ static void fetchTask(void* /*param*/) {
             if (n < 0) {
                 // 429 — back off exponentially, cap at 120 s
                 uint32_t base = rateLimitIntervalMs > 0 ? rateLimitIntervalMs
-                                                        : gConfig.fetch_interval_ms;
+                                                        : cfgFetchMs;
                 rateLimitIntervalMs = min(base * 2, (uint32_t)120000);
             } else {
                 rateLimitIntervalMs = 0;
@@ -252,6 +272,8 @@ static void fetchTask(void* /*param*/) {
 // ---------------------------------------------------------------------------
 void setup() {
     Serial.begin(115200);
+    fsLockInit();      // must exist before fetchTask() is created below
+    configMutexInit(); // ditto
     if (!psramFound()) {
         Serial.println("[MEM] WARNING: No PSRAM found!");
         Serial.println("[MEM] Hint: Arduino IDE → Tools → PSRAM → OPI PSRAM");
@@ -259,9 +281,55 @@ void setup() {
         Serial.printf("[MEM] PSRAM found: %d bytes\n", ESP.getPsramSize());
     }
 
-    // Filesystem (format on first boot)
-    if (!LittleFS.begin(true)) {
-        Serial.println("LittleFS mount failed");
+    // Filesystem. Mount WITHOUT auto-format first — begin(true) formats
+    // silently on any mount failure, and a mount can fail for reasons that
+    // have nothing to do with "this is a genuinely fresh, never-formatted
+    // chip" (an interrupted write, accumulated corruption after days of
+    // uptime). Silently reformatting in that case nukes the logo and
+    // route/airport caches with zero trace in the log — exactly the kind
+    // of "why are my logos suddenly gone" report that's otherwise
+    // undiagnosable after the fact. WiFi credentials and the device config
+    // (location/radius/layout) live in NVS, a separate partition, so they
+    // survive this either way — only the logo cache is actually at risk.
+    // One retry covers a transient SPI flash hiccup; only format as a last
+    // resort, and make it loud.
+    bool fsOk = LittleFS.begin(false);
+    if (!fsOk) {
+        delay(200);
+        fsOk = LittleFS.begin(false);
+    }
+    if (!fsOk) {
+        Serial.println("[FS] WARNING: mount failed after retry — reformatting. "
+                        "Cached logos and route/airport data will be lost; "
+                        "WiFi credentials and device config are unaffected (stored in NVS).");
+        // NVS is a separate flash partition from LittleFS, so this counter
+        // (and WiFi credentials — see provisioning.cpp) survive the wipe
+        // below, giving real evidence of how often this actually happens
+        // instead of just a one-off "restart after a few days" report.
+        Preferences diag;
+        if (diag.begin("ft-diag", false)) {
+            uint32_t wipes = diag.getUInt("fs_wipes", 0) + 1;
+            diag.putUInt("fs_wipes", wipes);
+            diag.end();
+            Serial.printf("[FS] This device has now reformatted %u time(s) since first boot\n", wipes);
+        }
+        fsOk = LittleFS.begin(true);  // format + mount
+        if (!fsOk) Serial.println("[FS] CRITICAL: mount still failed even after format");
+    } else {
+        Serial.println("[FS] Mounted cleanly — cache intact");
+    }
+    {
+        // Quick inventory so a "logos missing" report can be checked
+        // against what's actually on flash right now, without needing to
+        // reproduce the problem live.
+        File dir = LittleFS.open("/logos");
+        int n = 0;
+        if (dir) {
+            File f;
+            while ((f = dir.openNextFile())) { n++; f.close(); }
+            dir.close();
+        }
+        Serial.printf("[FS] /logos contains %d cached file(s)\n", n);
     }
     routesInit();
 
@@ -340,9 +408,9 @@ void setup() {
         Serial.printf("[SSL-TEST] heap after test: %d free\n", ESP.getFreeHeap());
     }
 
-    // Load persisted config (if any)
+    // Load persisted config (if any) — from NVS, survives a LittleFS wipe
     if (configLoad()) {
-        Serial.println("Config loaded from flash");
+        Serial.println("Config loaded from NVS");
     } else {
         // Use default layout so display is populated if config arrives later
         gConfig.block_count = defaultLayout(gConfig.blocks, MAX_BLOCKS);

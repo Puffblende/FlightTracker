@@ -3,14 +3,15 @@
 #define FT_PROVISIONING_H
 
 // ---------------------------------------------------------------------------
-// WiFi credential persistence  (/wifi.json on LittleFS)
+// WiFi credential persistence — NVS (ESP32 Preferences), a separate flash
+// partition from LittleFS so a LittleFS reformat can't take WiFi down too.
 // ---------------------------------------------------------------------------
 
 // Load saved credentials into out_ssid / out_pass.
-// Returns false if /wifi.json is absent or corrupt.
+// Returns false if none are saved.
 bool wifiCredsLoad(char* outSsid, int ssidLen, char* outPass, int passLen);
 
-// Delete /wifi.json (call before ESP.restart() to force re-provisioning).
+// Clear saved credentials (call before ESP.restart() to force re-provisioning).
 void wifiCredsClear();
 
 // ---------------------------------------------------------------------------

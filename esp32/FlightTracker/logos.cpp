@@ -1,6 +1,7 @@
 #include "logos.h"
 #include "display.h"
 #include "config.h"
+#include "fs_lock.h"
 #include <LittleFS.h>
 #include <Arduino.h>
 
@@ -65,6 +66,11 @@ void drawLogo(const char* icao, int x, int y, int size,
     char path[48];
     snprintf(path, sizeof(path), "/logos/%.3s_%d.bin", icao, size);
 
+    // Guards against fetchTask (a different core) writing the route/airport
+    // cache to LittleFS at the same moment this reads a logo file — without
+    // this, the read can come back truncated even though the file opens
+    // fine (a HIT that silently renders as solid black). See fs_lock.h.
+    FsLock _lock;
     File f = LittleFS.open(path, "r");
     if (!f) {
         Serial.printf("[Logo] MISS %s (not cached at this size) — drawing fallback icon\n", path);

@@ -279,10 +279,16 @@ class LayoutBlock:
     def width(self) -> int:
         if self.key == "logo":
             return _LOGO_SIZES.get(self.fmt, 24)
-        if self.key == "progress":
-            return max(4, int(self.custom_width)) if self.custom_width else 40
-        if self.key == "aircraft_type" and self.fmt == "auto" and self.custom_width:
+        # A user-set width always wins, for any block — this is what lets the
+        # canvas edge-drag resize (layout_editor.BlockItem) work generically
+        # instead of only for progress/aircraft_type-auto, which is all it
+        # covered before. Both renderers (src/core/renderer.py and the ESP32's
+        # renderer.cpp) already clip text to block.width unconditionally, so
+        # widening/narrowing any block here is immediately reflected there.
+        if self.custom_width:
             return max(4, int(self.custom_width))
+        if self.key == "progress":
+            return 40
         n = max(1, self.text_char_count)
         char_w_scaled = max(1, int(round(CHAR_W * self.font_scale)))
         spacing_scaled = max(0, int(round(CHAR_SPACING * self.font_scale)))

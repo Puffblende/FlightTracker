@@ -2,9 +2,11 @@
 #include "config.h"
 #include "renderer.h"
 #include "provisioning.h"
+#include "fs_lock.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <LittleFS.h>
+#include <Preferences.h>
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
 #include <string.h>
@@ -43,26 +45,40 @@ static void saveLogo(const char* icao, const char* hexStr) {
         return;
     }
 
+    // Decode the whole image into one buffer first (max 40*40*3 = 4800 B,
+    // trivial on the stack) and issue a single write() below. The previous
+    // one-byte-at-a-time write loop meant up to ~4800 individual LittleFS
+    // writes per logo — tens of thousands across a full-catalog push — which
+    // was almost certainly why pushes were timing out at 30s, and gave a lot
+    // more opportunity for a write to be interrupted mid-flight than one
+    // linear write does.
+    static uint8_t buf[1 + 40 * 40 * 3];
+    buf[0] = 0;  // reserved header byte (matches logos.cpp cache format)
+    auto h = [](char c) -> uint8_t {
+        if (c >= '0' && c <= '9') return (uint8_t)(c - '0');
+        if (c >= 'a' && c <= 'f') return (uint8_t)(c - 'a' + 10);
+        if (c >= 'A' && c <= 'F') return (uint8_t)(c - 'A' + 10);
+        return 0;
+    };
+    for (int i = 0; i + 1 < hexLen; i += 2)
+        buf[1 + i / 2] = (h(hexStr[i]) << 4) | h(hexStr[i + 1]);
+
     char path[48];
     snprintf(path, sizeof(path), "/logos/%.3s_%d.bin", icao, logoSize);
+    // Guards against fetchTask (a different core) touching LittleFS at the
+    // same moment this writes a logo file — see fs_lock.h.
+    FsLock _lock;
     LittleFS.mkdir("/logos");
     File f = LittleFS.open(path, "w");
     if (!f) { Serial.printf("[Logo] Cannot write %s\n", path); return; }
 
-    uint8_t header = 0;
-    f.write(&header, 1);  // reserved header byte (matches logos.cpp cache format)
-
-    for (int i = 0; i + 1 < hexLen; i += 2) {
-        auto h = [](char c) -> uint8_t {
-            if (c >= '0' && c <= '9') return (uint8_t)(c - '0');
-            if (c >= 'a' && c <= 'f') return (uint8_t)(c - 'a' + 10);
-            if (c >= 'A' && c <= 'F') return (uint8_t)(c - 'A' + 10);
-            return 0;
-        };
-        uint8_t b = (h(hexStr[i]) << 4) | h(hexStr[i + 1]);
-        f.write(&b, 1);
-    }
+    size_t total = 1 + byteCount;
+    size_t written = f.write(buf, total);
     f.close();
+    if (written != total) {
+        Serial.printf("[Logo] Short write %s: %d/%d bytes\n", path, (int)written, (int)total);
+        return;
+    }
     Serial.printf("[Logo] Saved %s (%d px, from config push)\n", path, logoSize);
 }
 
@@ -74,6 +90,9 @@ static void saveLogo(const char* icao, const char* hexStr) {
 // alongside the fresh ones streamed in afterwards.
 // ---------------------------------------------------------------------------
 static void clearLogoCache() {
+    // Guards this whole walk-and-delete against fetchTask's concurrent
+    // LittleFS writes — see fs_lock.h.
+    FsLock _lock;
     File dir = LittleFS.open("/logos");
     if (!dir) { LittleFS.mkdir("/logos"); return; }
 
@@ -132,6 +151,9 @@ static void saveLogosFromJson(JsonObject logos) {
 // Globals
 // ---------------------------------------------------------------------------
 DeviceConfig gConfig = {};
+SemaphoreHandle_t gConfigMutex = nullptr;
+void configMutexInit() { gConfigMutex = xSemaphoreCreateMutex(); }
+
 static WebServer server(HTTP_PORT);
 
 // ---------------------------------------------------------------------------
@@ -186,24 +208,13 @@ static void blockFromJson(LayoutBlock& blk, JsonObject obj) {
     }
 }
 
-static void blockToJson(JsonObject obj, const LayoutBlock& blk) {
-    obj["key"]          = blk.key;
-    obj["x"]            = blk.x;
-    obj["y"]            = blk.y;
-    obj["enabled"]      = blk.enabled;
-    obj["fmt"]          = blk.fmt;
-    obj["font_scale"]   = blk.font_scale;
-    obj["custom_label"] = blk.custom_label;
-    obj["custom_unit"]  = blk.custom_unit;
-    obj["custom_width"] = blk.custom_width;
-    JsonArray col = obj.createNestedArray("color");
-    col.add(blk.r); col.add(blk.g); col.add(blk.b);
-}
-
 // ---------------------------------------------------------------------------
 // Apply parsed JSON document → gConfig
 // ---------------------------------------------------------------------------
 static void applyConfigDoc(JsonDocument& doc) {
+    // Guards against fetchTask (a different core) reading gConfig mid-write
+    // — see the comment on gConfigMutex in ft_webserver.h.
+    if (gConfigMutex) xSemaphoreTake(gConfigMutex, portMAX_DELAY);
     gConfig.lat             = doc["lat"]              | 0.0f;
     gConfig.lon             = doc["lon"]              | 0.0f;
     gConfig.radius_km       = doc["radius_km"]        | 100.0f;
@@ -233,64 +244,80 @@ static void applyConfigDoc(JsonDocument& doc) {
         gConfig.block_count = defaultLayout(gConfig.blocks, MAX_BLOCKS);
 
     gConfig.valid = true;
+    if (gConfigMutex) xSemaphoreGive(gConfigMutex);
 
     // Save logos pushed from Python app (hex-encoded 24×24 RGB, key = ICAO)
     saveLogosFromJson(doc["logos"]);
 
-    // Save airline names pushed from Python app (key = ICAO, value = name)
-    JsonObject airlineNames = doc["airline_names"];
-    if (!airlineNames.isNull()) {
-        LittleFS.mkdir("/airlines");
-        int n = 0;
-        for (JsonPair kv : airlineNames) {
-            const char* name = kv.value().as<const char*>();
-            if (name && name[0]) {
-                char path[40];
-                snprintf(path, sizeof(path), "/airlines/%.3s.txt", kv.key().c_str());
-                File f = LittleFS.open(path, "w");
-                if (f) { f.print(name); f.close(); n++; }
-            }
-        }
-        if (n) Serial.printf("[Config] Saved %d airline names to SPIFFS\n", n);
-    }
+    // Note: doc["airline_names"] (pushed from the Python app) is
+    // intentionally unused — airline names are resolved from the static
+    // AIRLINE_DB table (airlines.cpp) via airlineLookup(), not from any
+    // per-device data. An earlier design wrote these to /airlines/*.txt on
+    // LittleFS, but nothing ever read that back; it was pure dead weight —
+    // an extra LittleFS write on every config push for no effect.
 }
 
 // ---------------------------------------------------------------------------
-// LittleFS persistence
+// Config persistence — NVS (ESP32 Preferences), not LittleFS.
+//
+// gConfig is a fixed-size POD struct (no pointers), so it's persisted as a
+// raw byte blob — no JSON round-trip needed. NVS is a separate flash
+// partition from LittleFS (same reasoning as the WiFi credentials in
+// provisioning.cpp), so the device's location/radius/layout now survive a
+// LittleFS reformat: after a wipe the device reconnects to WiFi *and* keeps
+// fetching flights from the same place, instead of sitting on a blank
+// "Waiting for config..." screen until the Python app pushes again. Only
+// the logo cache — too large for NVS, and non-essential to core operation —
+// is actually lost in that scenario now.
 // ---------------------------------------------------------------------------
+#define CONFIG_NVS_NAMESPACE "ft-config"
+
 bool configSave() {
-    DynamicJsonDocument doc(16384);
-    doc["lat"]              = gConfig.lat;
-    doc["lon"]              = gConfig.lon;
-    doc["radius_km"]        = gConfig.radius_km;
-    doc["fetch_interval_s"] = gConfig.fetch_interval_ms / 1000;
-    doc["cycle_interval_s"] = gConfig.cycle_interval_ms / 1000;
-    doc["opensky_user"]     = gConfig.opensky_user;
-    doc["opensky_pass"]     = gConfig.opensky_pass;
-
-    JsonArray layout = doc.createNestedArray("layout");
-    for (int i = 0; i < gConfig.block_count; i++)
-        blockToJson(layout.createNestedObject(), gConfig.blocks[i]);
-
-    File f = LittleFS.open(CONFIG_PATH, "w");
-    if (!f) return false;
-    serializeJson(doc, f);
-    f.close();
-    return true;
+    Preferences prefs;
+    if (!prefs.begin(CONFIG_NVS_NAMESPACE, false)) return false;
+    size_t written = prefs.putBytes("blob", &gConfig, sizeof(gConfig));
+    prefs.end();
+    return written == sizeof(gConfig);
 }
+
+#define LEGACY_CONFIG_JSON_PATH "/config.json"
 
 bool configLoad() {
-    if (!LittleFS.exists(CONFIG_PATH)) return false;
-    File f = LittleFS.open(CONFIG_PATH, "r");
-    if (!f) return false;
+    Preferences prefs;
+    if (prefs.begin(CONFIG_NVS_NAMESPACE, true)) {  // read-only
+        size_t stored = prefs.getBytesLength("blob");
+        if (stored == sizeof(gConfig)) {
+            DeviceConfig loaded;
+            prefs.getBytes("blob", &loaded, sizeof(loaded));
+            prefs.end();
+            gConfig = loaded;
+            gConfig.valid = true;
+            return true;
+        }
+        prefs.end();
+    }
 
-    DynamicJsonDocument doc(16384);
-    auto err = deserializeJson(doc, f);
-    f.close();
-    if (err) return false;
-
-    applyConfigDoc(doc);
-    return true;
+    // One-time migration: NVS is empty, which is what every device coming
+    // from firmware that stored config as /config.json on LittleFS will see
+    // on its first boot after this update. Adopt the old file instead of
+    // forcing a fresh push from the Python app purely because of where the
+    // bytes happen to live.
+    if (LittleFS.exists(LEGACY_CONFIG_JSON_PATH)) {
+        File f = LittleFS.open(LEGACY_CONFIG_JSON_PATH, "r");
+        if (f) {
+            DynamicJsonDocument doc(16384);
+            auto err = deserializeJson(doc, f);
+            f.close();
+            if (!err) {
+                Serial.println("[Config] Migrating config from legacy /config.json to NVS");
+                applyConfigDoc(doc);
+                configSave();
+                LittleFS.remove(LEGACY_CONFIG_JSON_PATH);
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------

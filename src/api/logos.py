@@ -169,16 +169,22 @@ def _try_fetch(iata: str, icao: str, w: int, h: int):
     return None
 
 
-def get_logo(iata: str, w: int = 24, h: int = 24, icao: str = "") -> Image.Image:
-    """Return airline logo as w×h RGB PIL Image.
-    Uses memory → disk cache → CDN fetch → generic icon."""
-    key = f"{iata or icao}_{w}_{h}"
+# One fetch per airline, at a resolution comfortably above every size the
+# layout editor offers (sq16..sq40) plus headroom for future formats. Every
+# requested (w, h) is derived from this via a local resize instead of its
+# own independent CDN round-trip — so changing the logo block's configured
+# size (or the push needing a different size than the on-screen preview
+# last used) never depends on the network again once an airline has been
+# looked up once, at any size.
+_MASTER_SIZE = 128
+
+
+def _fetch_master(iata: str, icao: str) -> Image.Image | None:
+    key = f"{iata or icao}_master"
     with _lock:
         if key in _memory:
-            cached = _memory[key]
-            return cached if cached is not None else _generic_plane(w, h)
+            return _memory[key]
 
-    # Try disk cache first
     cache_file = CACHE_DIR / f"{key}.png"
     if cache_file.exists():
         try:
@@ -189,8 +195,7 @@ def get_logo(iata: str, w: int = 24, h: int = 24, icao: str = "") -> Image.Image
         except Exception:
             pass
 
-    # Fetch from network
-    img = _try_fetch(iata, icao, w, h)
+    img = _try_fetch(iata, icao, _MASTER_SIZE, _MASTER_SIZE)
     if img:
         try:
             img.save(cache_file)
@@ -199,7 +204,20 @@ def get_logo(iata: str, w: int = 24, h: int = 24, icao: str = "") -> Image.Image
 
     with _lock:
         _memory[key] = img   # store None if all sources failed (avoids retry spam)
-    return img if img is not None else _generic_plane(w, h)
+    return img
+
+
+def get_logo(iata: str, w: int = 24, h: int = 24, icao: str = "") -> Image.Image:
+    """Return airline logo as w×h RGB PIL Image.
+    Derived from the single cached master fetch for this airline (see
+    _fetch_master) via a local resize — falls back to the generic plane
+    icon only if the master fetch itself failed."""
+    master = _fetch_master(iata, icao)
+    if master is None:
+        return _generic_plane(w, h)
+    if master.size == (w, h):
+        return master
+    return master.resize((w, h), Image.Resampling.LANCZOS)
 
 
 def prefetch_async(iata: str, w: int = 24, h: int = 24, icao: str = "") -> None:

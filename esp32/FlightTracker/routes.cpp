@@ -1,5 +1,6 @@
 #include "routes.h"
 #include "http_utils.h"
+#include "fs_lock.h"
 #include <ArduinoJson.h>
 #include <Arduino.h>
 #include <LittleFS.h>
@@ -79,6 +80,10 @@ static RouteEntry* findCached(const char* callsign) {
 
 static void storeCache(const char* callsign, const char* origin, const char* dest,
                         const char* originIcao, const char* destIcao) {
+    // Guards the LittleFS write below against fetchTask's own writes
+    // colliding with whatever the main loop (rendering/webserver) is doing
+    // to the filesystem at the same moment — see fs_lock.h.
+    FsLock _lock;
     RouteEntry& e = s_cache[s_nextSlot];
     strncpy(e.callsign, callsign, sizeof(e.callsign) - 1);   e.callsign[sizeof(e.callsign) - 1] = '\0';
     strncpy(e.origin, origin, sizeof(e.origin) - 1);         e.origin[sizeof(e.origin) - 1] = '\0';
@@ -133,6 +138,9 @@ static void loadAirportCache() {
 
 static void seedAirport(const char* code, float lat, float lon) {
     if (!code || !code[0] || isnan(lat) || isnan(lon)) return;
+    // Guards both the in-memory array (also read by routeCacheAirportLocation()
+    // from the main/render task) and the LittleFS write below — see fs_lock.h.
+    FsLock _lock;
     for (int i = 0; i < AIRPORT_CACHE_SIZE; i++) {
         if (s_airportCache[i].used && strcmp(s_airportCache[i].code, code) == 0) {
             s_airportCache[i].lat = lat;
@@ -153,6 +161,9 @@ static void seedAirport(const char* code, float lat, float lon) {
 
 bool routeCacheAirportLocation(const char* code, float& lat, float& lon) {
     if (!code || !code[0]) return false;
+    // Guards against seedAirport() (fetchTask, different core) mutating
+    // s_airportCache mid-read — see fs_lock.h.
+    FsLock _lock;
     for (int i = 0; i < AIRPORT_CACHE_SIZE; i++) {
         if (s_airportCache[i].used && strcmp(s_airportCache[i].code, code) == 0) {
             lat = s_airportCache[i].lat;
