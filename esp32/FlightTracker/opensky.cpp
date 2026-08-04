@@ -1,6 +1,7 @@
 #include "opensky.h"
 #include "logos.h"
 #include "airlines.h"
+#include "icao_country.h"
 #include "http_utils.h"
 #include <WiFi.h>
 #include <esp_heap_caps.h>
@@ -138,6 +139,10 @@ static bool parseAcArray(const String& body, float lat, float lon,
         strncpy(f.aircraft_type,      a["t"]      | "", sizeof(f.aircraft_type)       - 1);
         strncpy(f.aircraft_type_full, a["desc"]   | "", sizeof(f.aircraft_type_full)  - 1);
         cleanCallsign(f.callsign);
+
+        // adsb.lol doesn't report a country field — same as Python's
+        // adsb_lol.py, derive it from the ICAO24 address block instead.
+        strncpy(f.origin_country, countryForIcao24(f.icao24), sizeof(f.origin_country) - 1);
 
         // Python: airline lookup from callsign prefix; fall back to ownOp/desc
         airlineLookup(f.callsign, f.airline_name, sizeof(f.airline_name));
@@ -430,6 +435,10 @@ static bool fetchAdsbFi(const char* path, float lat, float lon,
         strncpy(f.dep_icao,           ac["dep_icao"] | "", sizeof(f.dep_icao)            - 1);
         strncpy(f.arr_icao,           ac["arr_icao"] | "", sizeof(f.arr_icao)            - 1);
         cleanCallsign(f.callsign);
+
+        // adsb.fi doesn't report a country field either — same fix as the
+        // adsb.lol path above.
+        strncpy(f.origin_country, countryForIcao24(f.icao24), sizeof(f.origin_country) - 1);
 
         airlineLookup(f.callsign, f.airline_name, sizeof(f.airline_name));
         if (!f.airline_name[0]) {

@@ -553,8 +553,16 @@ class ExternalDisplayTab(QWidget):
                 "enabled":      b.enabled,
                 "fmt":          b.fmt,
                 "color":        list(b.color),
-                "custom_label": b.custom_label,
-                "custom_unit":  b.custom_unit,
+                # Resolved text, not the raw nullable fields: custom_label/
+                # custom_unit are None whenever the user hasn't typed into
+                # those boxes, which is the common case. The ESP32 has no
+                # concept of "fall back to this format's default label" —
+                # it just prints whatever string it's given — so sending
+                # the raw None (-> JSON null -> "") silently dropped labels
+                # like "D:"/"km" that the Python preview shows via
+                # effective_label/effective_unit's own fallback logic.
+                "custom_label": b.effective_label,
+                "custom_unit":  b.effective_unit,
                 "font_scale":   b.font_scale,
                 "custom_width": b.custom_width,
             }

@@ -34,6 +34,8 @@
 #include "airlines.h"
 #include "routes.h"
 #include "aircraft_types.h"
+#include "icao_country.h"
+#include "logo_catalog.h"
 #include "fs_lock.h"
 
 #include <WiFi.h>
@@ -41,6 +43,7 @@
 #include <WiFiUdp.h>
 #include <LittleFS.h>
 #include <Preferences.h>
+#include <esp_system.h>
 #include <string.h>
 
 // ---------------------------------------------------------------------------
@@ -59,6 +62,15 @@ static uint32_t   rateLimitIntervalMs = 0;  // nonzero during 429 backoff
 // and Core 1 main loop.
 static SemaphoreHandle_t s_flightMutex = nullptr;
 static TaskHandle_t      s_fetchHandle = nullptr;
+
+// Updated by fetchTask() at the top of every iteration — a stale value in
+// loop() means fetchTask is stuck somewhere that isn't returning via its
+// own timeouts (network calls are all individually timeout-bounded, but
+// WiFiClientSecure has known cases where it can still block indefinitely).
+// Plain volatile, not mutex-protected: it's a single 32-bit write/read,
+// and staleness is judged with generous margin, so a torn read isn't a
+// real concern here the way it would be for multi-field state.
+static volatile uint32_t s_lastFetchHeartbeat = 0;
 
 // UDP sockets
 static WiFiUDP udpDisc;   // port 4210 — discovery
@@ -173,6 +185,7 @@ static void handleUdpFrame() {
 static void fetchTask(void* /*param*/) {
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
+        s_lastFetchHeartbeat = millis();  // proves this task is still cycling — see loop()'s hang check
 
         // Snapshot the gConfig fields this cycle needs while holding
         // gConfigMutex — a POST /config push (main loop, different core)
@@ -268,12 +281,65 @@ static void fetchTask(void* /*param*/) {
 }
 
 // ---------------------------------------------------------------------------
+// Crash-loop recovery
+//
+// A single crash already recovers on its own — ESP-IDF's panic/watchdog
+// handler reboots automatically, and we watched it do exactly that during
+// this project's own debugging. What it can't do is notice a *pattern*:
+// if the device keeps crashing shortly after boot, over and over, that's a
+// sign something persisted (almost certainly on LittleFS) is actually
+// corrupt, and rebooting into the same state won't break the cycle.
+//
+// wasCrash() distinguishes an abnormal reset (panic, task/interrupt
+// watchdog, brownout) from a normal one (power-on, or our own deliberate
+// ESP.restart() after WiFi provisioning) — only the former counts toward
+// the crash-loop counter, which lives in NVS (survives LittleFS wipes,
+// same reasoning as the WiFi/config storage) and resets itself once the
+// device has run stably for a while (see loop()).
+// ---------------------------------------------------------------------------
+static bool wasCrash() {
+    switch (esp_reset_reason()) {
+        case ESP_RST_PANIC:
+        case ESP_RST_INT_WDT:
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_WDT:
+        case ESP_RST_BROWNOUT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
 void setup() {
     Serial.begin(115200);
     fsLockInit();      // must exist before fetchTask() is created below
     configMutexInit(); // ditto
+
+    // Crash-loop counter — see the block comment above wasCrash(). Read
+    // (and bump, if this boot follows a crash) before touching LittleFS at
+    // all, so the count used for the escalation decision below reflects
+    // everything up to and including *this* boot.
+    uint32_t crashCount = 0;
+    {
+        bool crashed = wasCrash();
+        Preferences diag;
+        if (diag.begin("ft-diag", false)) {
+            crashCount = diag.getUInt("crash_count", 0);
+            if (crashed) {
+                crashCount++;
+                diag.putUInt("crash_count", crashCount);
+                Serial.printf("[Recovery] Boot follows a crash (reset reason=%d) — consecutive count: %u\n",
+                              (int)esp_reset_reason(), (unsigned)crashCount);
+            } else {
+                Serial.println("[Recovery] Clean boot (power-on or deliberate restart)");
+            }
+            diag.end();
+        }
+    }
+
     if (!psramFound()) {
         Serial.println("[MEM] WARNING: No PSRAM found!");
         Serial.println("[MEM] Hint: Arduino IDE → Tools → PSRAM → OPI PSRAM");
@@ -294,6 +360,7 @@ void setup() {
     // One retry covers a transient SPI flash hiccup; only format as a last
     // resort, and make it loud.
     bool fsOk = LittleFS.begin(false);
+    bool reformattedThisBoot = false;
     if (!fsOk) {
         delay(200);
         fsOk = LittleFS.begin(false);
@@ -314,9 +381,28 @@ void setup() {
             Serial.printf("[FS] This device has now reformatted %u time(s) since first boot\n", wipes);
         }
         fsOk = LittleFS.begin(true);  // format + mount
+        reformattedThisBoot = true;
         if (!fsOk) Serial.println("[FS] CRITICAL: mount still failed even after format");
     } else {
         Serial.println("[FS] Mounted cleanly — cache intact");
+    }
+
+    // Crash-loop escalation. Independent of the mount-failure reformat
+    // above (which is keyed on *this boot's* mount outcome) — this is
+    // keyed on a *pattern* of crashes across recent boots, whatever their
+    // cause. Skipped if we already reformatted above: no point doing it
+    // twice, or clearing logos that a full reformat already wiped.
+    if (!reformattedThisBoot && fsOk) {
+        if (crashCount >= 4) {
+            Serial.println("[Recovery] Repeated crashes — forcing a full LittleFS reformat as a last resort");
+            LittleFS.end();
+            fsOk = LittleFS.begin(true);
+            Serial.printf("[Recovery] Reformat %s\n", fsOk ? "OK" : "FAILED");
+        } else if (crashCount >= 2) {
+            Serial.println("[Recovery] Repeated crashes — clearing the logo cache "
+                            "(cheapest, most write-heavy, least critical data) before continuing");
+            clearLogoCache();
+        }
     }
     {
         // Quick inventory so a "logos missing" report can be checked
@@ -470,6 +556,35 @@ void loop() {
                       now, (int)gConfig.valid, flightCount);
         Serial.printf("[Main] Last fetch: %lu ms ago, rateLimit=%lu ms\n",
                       now - lastFetchMs, (unsigned long)rateLimitIntervalMs);
+
+        // fetchTask hang detector. Generous margin above the worst realistic
+        // cycle time (main fetch + up to 6 route lookups, each individually
+        // timeout-bounded around 30-40s worst case) — anything beyond this
+        // means fetchTask is stuck somewhere that isn't returning via its
+        // own timeouts (WiFiClientSecure has known cases where it can still
+        // block indefinitely), and no amount of waiting fixes that.
+        const uint32_t HANG_THRESHOLD_MS = 6UL * 60UL * 1000UL;  // 6 minutes
+        if (s_lastFetchHeartbeat != 0 && now - s_lastFetchHeartbeat > HANG_THRESHOLD_MS) {
+            Serial.println("[Recovery] fetchTask appears hung — no heartbeat in 6+ minutes, restarting");
+            delay(200);
+            ESP.restart();
+        }
+
+        // Crash-loop counter reset: once we've been running normally this
+        // long, this boot is evidently fine — a future crash should start
+        // a fresh count, not pile onto ones from an unrelated past
+        // incident. (Gated on the same 30s cadence as this block purely to
+        // avoid a separate timer; the actual condition is 5 stable minutes.)
+        static bool crashCounterCleared = false;
+        if (!crashCounterCleared && now >= 5UL * 60UL * 1000UL) {
+            crashCounterCleared = true;
+            Preferences diag;
+            if (diag.begin("ft-diag", false)) {
+                diag.putUInt("crash_count", 0);
+                diag.end();
+            }
+            Serial.println("[Recovery] Stable for 5 minutes — crash counter reset");
+        }
     }
 
     // ── Memory monitor — every 60 s ──────────────────────────────────────────

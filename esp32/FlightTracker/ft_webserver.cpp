@@ -89,7 +89,7 @@ static void saveLogo(const char* icao, const char* hexStr) {
 // previous push (e.g. an airline's logo changed upstream) never linger
 // alongside the fresh ones streamed in afterwards.
 // ---------------------------------------------------------------------------
-static void clearLogoCache() {
+void clearLogoCache() {
     // Guards this whole walk-and-delete against fetchTask's concurrent
     // LittleFS writes — see fs_lock.h.
     FsLock _lock;

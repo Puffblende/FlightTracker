@@ -2,67 +2,81 @@
 #include "display.h"
 #include "config.h"
 #include "fs_lock.h"
+#include "logo_catalog.h"
+#include "plane_icon.h"
 #include <LittleFS.h>
 #include <Arduino.h>
 
 static const int MAX_LOGO_SIZE = 40;
 
 // ---------------------------------------------------------------------------
-// Fallback: generic top-down aircraft silhouette
+// Draw a baked-in 40x40 RGB image (real logo or the fallback plane icon,
+// below) at any requested size via nearest-neighbor resize — same idea as
+// get_logo()'s master-image cache in src/api/logos.py: bake once at a
+// single fixed size, derive everything smaller on the fly. Iterates
+// DESTINATION pixels and maps back to the source, not the other way
+// around — walking the source and scaling each pixel's position up only
+// lights one pixel per source cell for any size > 40, leaving gaps in
+// between (exactly the "empty pixels in the logo" bug the old hand-rolled
+// plane-icon renderer had).
 // ---------------------------------------------------------------------------
-
-// Pointed nose → tapering fuselage → diamond-shaped swept wings that peak
-// at full width for one row → straight fuselage → a clearly smaller tail
-// stabilizer → tapered tail. Mirrors _PLANE_16 in src/api/logos.py exactly.
-static const uint16_t PLANE_16[16] = {
-    0x0180,  // nose tip
-    0x0180,
-    0x03C0,
-    0x03C0,
-    0x03C0,
-    0x0FF0,  // wings ramping up
-    0x3FFC,
-    0xFFFF,  // full wingspan
-    0x3FFC,  // wings ramping down
-    0x03C0,
-    0x03C0,
-    0x03C0,
-    0x0FF0,  // tail stabilizer — smaller than the main wings
-    0x03C0,
-    0x03C0,
-    0x0180,  // tail tip
-};
-
-static void drawPlaneIcon(int x, int y, int size, uint8_t r, uint8_t g, uint8_t b) {
-    for (int row = 0; row < 16; row++) {
-        for (int col = 0; col < 16; col++) {
-            if (!(PLANE_16[row] & (0x8000u >> col))) continue;
-            int px = x + col * size / 16;
-            int py = y + row * size / 16;
-            if (px >= 0 && px < TOTAL_WIDTH && py >= 0 && py < TOTAL_HEIGHT)
-                displaySetPixel(px, py, r, g, b);
+static void drawBakedLogo(const uint8_t* src, int x, int y, int size,
+                          uint8_t /*r*/, uint8_t /*g*/, uint8_t /*b*/) {
+    for (int dy = 0; dy < size; dy++) {
+        int sy = (dy * BAKED_LOGO_SIZE) / size;
+        int py = y + dy;
+        if (py < 0 || py >= TOTAL_HEIGHT) continue;
+        for (int dx = 0; dx < size; dx++) {
+            int sx = (dx * BAKED_LOGO_SIZE) / size;
+            int px = x + dx;
+            if (px < 0 || px >= TOTAL_WIDTH) continue;
+            const uint8_t* p = src + (sy * BAKED_LOGO_SIZE + sx) * 3;
+            displaySetPixel(px, py, p[0], p[1], p[2]);
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Draw logo from LittleFS cache, or plane icon fallback.
+// Fallback: generic plane icon — a real 40x40 RGB asset (plane_icon.cpp,
+// composited onto black once in Python from src/assets/plane_icon.png),
+// not a hand-drawn 1-bit mask. Drawn the same way as a real baked logo.
+// ---------------------------------------------------------------------------
+static void drawPlaneIcon(int x, int y, int size, uint8_t r, uint8_t g, uint8_t b) {
+    drawBakedLogo(planeIconData(), x, y, size, r, g, b);
+}
+
+// ---------------------------------------------------------------------------
+// Draw logo: baked-in catalog first, LittleFS cache second, plane icon last.
 //
-// File layout: byte 0 = reserved; bytes 1…end = size×size×3 raw RGB.
-// Logos are written by ft_webserver.cpp from the "logos" object pushed in
-// POST /config (hex-encoded RGB from src/api/logos.py, sized to match the
-// layout's logo block — see external_tab.py's _current_logo_size()) — the
-// ESP32 never fetches logos from the network itself.
+// The baked catalog (logo_catalog.cpp) covers every airline in AIRLINE_DB —
+// i.e. every airline the device can ever resolve a name for at all — so in
+// practice this is the only path that ever matters now: no network fetch,
+// no dependency on a Python push having arrived or survived a filesystem
+// event, available immediately after any reflash.
 //
-// Pixels are drawn exactly as received: no background skipping, no color
-// tinting. Python already composited each logo onto its correct background
-// (white or black, whichever reads best on that particular mark — see
-// _composite_on_white) before sending it, so re-processing here would just
-// make the device's rendering diverge from what the Python app shows.
+// The LittleFS path only still exists as a safety net for an ICAO that
+// somehow isn't in the baked catalog (shouldn't happen given the above,
+// but costs nothing to keep). File layout there: byte 0 = reserved;
+// bytes 1…end = size×size×3 raw RGB, written by ft_webserver.cpp from a
+// POST /config or /logos push.
+//
+// Either way, pixels are drawn exactly as received: no background
+// skipping, no color tinting. Python already composited each logo onto its
+// correct background (white or black, whichever reads best on that
+// particular mark — see _composite_on_white) before it was baked in or
+// pushed, so re-processing here would just make the device's rendering
+// diverge from what the Python app shows.
 // ---------------------------------------------------------------------------
 
 void drawLogo(const char* icao, int x, int y, int size,
               uint8_t r, uint8_t g, uint8_t b) {
+    const uint8_t* baked = lookupBakedLogo(icao);
+    if (baked) {
+        Serial.printf("[Logo] BAKED HIT %.3s\n", icao);
+        drawBakedLogo(baked, x, y, size, r, g, b);
+        return;
+    }
+
     char path[48];
     snprintf(path, sizeof(path), "/logos/%.3s_%d.bin", icao, size);
 
@@ -73,11 +87,11 @@ void drawLogo(const char* icao, int x, int y, int size,
     FsLock _lock;
     File f = LittleFS.open(path, "r");
     if (!f) {
-        Serial.printf("[Logo] MISS %s (not cached at this size) — drawing fallback icon\n", path);
+        Serial.printf("[Logo] MISS %s (not in baked catalog or LittleFS) — drawing fallback icon\n", path);
         drawPlaneIcon(x, y, size, r, g, b);
         return;
     }
-    Serial.printf("[Logo] HIT %s\n", path);
+    Serial.printf("[Logo] LittleFS HIT %s\n", path);
 
     uint8_t header = 0;
     f.read(&header, 1);  // skip reserved byte

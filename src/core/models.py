@@ -421,7 +421,10 @@ def value_airline(flight, fmt_id: str) -> str:
     name = flight.airline_name or flight.airline_icao or flight.callsign[:3]
     if fmt_id == "short": return (name.split()[0][:8].upper() if name else "---")
     if fmt_id == "icao":  return (flight.airline_icao or flight.callsign[:3]).upper()
-    return (name or "---").upper()
+    # "full" — keep the name's natural casing (e.g. "Middle East Airlines"),
+    # matching the ESP32's fmtAirline(), which prints AIRLINE_DB's stored
+    # name as-is rather than forcing it to all caps.
+    return name or "---"
 
 
 def value_callsign(flight, fmt_id: str) -> str:

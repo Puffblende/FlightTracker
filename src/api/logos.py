@@ -20,40 +20,22 @@ _lock = threading.Lock()
 _memory: dict = {}          # cache_key -> Image.Image | None
 _HEADERS = {"User-Agent": "FlightTracker/1.0"}
 
-# 16×16 pixel-art top-down plane (1 = lit, 0 = off).
-# Pointed nose → tapering fuselage → diamond-shaped swept wings that peak
-# at full width for one row → straight fuselage → a clearly smaller tail
-# stabilizer → tapered tail. Keeping the wing peak to a single row (instead
-# of a thick flat bar) and making the tail visibly smaller than the main
-# wings is what makes this read as a plane instead of two identical flares
-# joined by a straight shaft.
-_PLANE_16 = [
-    [0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0],
-    [0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0],
-    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
-    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
-    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
-    [0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0],
-    [0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0],
-    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-    [0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0],
-    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
-    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
-    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
-    [0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0],
-    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
-    [0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
-    [0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0],
-]
+# Fallback icon — a real 40x40 vector-style asset (user-supplied), composited
+# onto black once and cached; every requested size is a resize of that.
+_PLANE_ICON_PATH = Path(__file__).resolve().parent.parent / "assets" / "plane_icon.png"
+_plane_icon_master: Image.Image | None = None
 
 
-def _generic_plane(w: int, h: int, color: tuple = (80, 140, 255)) -> Image.Image:
-    img = Image.new("RGB", (16, 16), (0, 0, 0))
-    for r, row in enumerate(_PLANE_16):
-        for c, pix in enumerate(row):
-            if pix:
-                img.putpixel((c, r), color)
-    return img.resize((w, h), Image.Resampling.NEAREST)
+def _generic_plane(w: int, h: int) -> Image.Image:
+    global _plane_icon_master
+    if _plane_icon_master is None:
+        img = Image.open(_PLANE_ICON_PATH).convert("RGBA")
+        bg = Image.new("RGB", img.size, (0, 0, 0))
+        bg.paste(img, mask=img.split()[-1])
+        _plane_icon_master = bg
+    if (w, h) == _plane_icon_master.size:
+        return _plane_icon_master
+    return _plane_icon_master.resize((w, h), Image.Resampling.LANCZOS)
 
 
 def collect_known_airline_catalog() -> list[tuple[str, str, str]]:

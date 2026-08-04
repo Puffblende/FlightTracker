@@ -41,6 +41,11 @@ void configMutexInit();
 bool configSave();
 bool configLoad();
 
+// Delete every cached logo .bin file. Exposed (not just the /reset-logos
+// HTTP handler) so the boot-time crash-loop recovery in FlightTracker.ino
+// can call it directly as an escalation step.
+void clearLogoCache();
+
 // Start the HTTP server (call once in setup, after WiFi connects).
 void webserverBegin();
 
