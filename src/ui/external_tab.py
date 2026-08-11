@@ -580,6 +580,7 @@ class ExternalDisplayTab(QWidget):
             "cycle_interval_s": int(st["cycle_interval"]),
             "opensky_user":     str(mw._os_user or ""),
             "opensky_pass":     str(mw._os_pass or ""),
+            "hidden_categories": list(st["hidden_categories"]),
             "display_w":        int(display_w),
             "display_h":        int(display_h),
             "layout":           layout,

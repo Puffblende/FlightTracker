@@ -12,6 +12,18 @@ from src.core.displays import DISPLAY_SIZES, DEFAULT_SIZE_KEY, CUSTOM_KEY
 
 CUSTOM_ITEM = ("__custom__", "Custom size…")
 
+# ADS-B emitter category codes worth letting the user hide. Category "C*"
+# (ground vehicles) is already dropped unconditionally upstream in
+# adsb_lol.py — these are the ones that are valid airborne traffic but not
+# necessarily wanted on a flight-tracker display (gliders, balloons, etc).
+CATEGORY_FILTERS = [
+    ("B1", "Gliders / sailplanes"),
+    ("B2", "Balloons / airships"),
+    ("B3", "Parachutists / skydivers"),
+    ("B4", "Ultralights / paragliders"),
+    ("B5", "Other (reserved category)"),
+]
+
 
 class CustomSizeDialog(QDialog):
     """Ask for LED grid dimensions and an optional target window size."""
@@ -72,6 +84,7 @@ class SettingsPanel(QWidget):
     credentials_changed = pyqtSignal(str, str)
     display_size_changed = pyqtSignal(str)              # preset key
     custom_display_size_changed = pyqtSignal(int, int, int, int)  # gw,gh,ww,wh
+    hidden_categories_changed = pyqtSignal(object)       # set[str] of hidden category codes
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -188,6 +201,17 @@ class SettingsPanel(QWidget):
 
         layout.addWidget(time_box)
 
+        # ── Aircraft Filter ───────────────────────────────────
+        filt_box = QGroupBox("Hide Aircraft Categories")
+        filt_layout = QVBoxLayout(filt_box)
+        self._cat_checks: dict[str, QCheckBox] = {}
+        for code, label in CATEGORY_FILTERS:
+            cb = QCheckBox(f"{label} ({code})")
+            cb.stateChanged.connect(self._on_category_toggle)
+            filt_layout.addWidget(cb)
+            self._cat_checks[code] = cb
+        layout.addWidget(filt_box)
+
         # ── OpenSky credentials (optional) ────────────────────
         cred_box = QGroupBox("OpenSky Credentials (optional)")
         cred_form = QFormLayout(cred_box)
@@ -222,6 +246,9 @@ class SettingsPanel(QWidget):
         layout.addWidget(hint)
 
         layout.addStretch()
+
+    def _on_category_toggle(self, _state: int):
+        self.hidden_categories_changed.emit(self.hidden_categories)
 
     def _on_radius(self, val: int):
         self.lbl_radius.setText(f"{val} km")
@@ -293,6 +320,10 @@ class SettingsPanel(QWidget):
     def credentials(self):
         return (self.txt_user.text(), self.txt_pass.text())
 
+    @property
+    def hidden_categories(self) -> set[str]:
+        return {code for code, cb in self._cat_checks.items() if cb.isChecked()}
+
     # ── Preset state helpers ──────────────────────────────────────────────────
 
     def get_state(self) -> dict:
@@ -306,6 +337,7 @@ class SettingsPanel(QWidget):
             "cycle_interval": self.spin_cycle.value(),
             "opensky_user":   self.txt_user.text(),
             "opensky_pass":   self.txt_pass.text(),
+            "hidden_categories": sorted(self.hidden_categories),
         }
 
     def restore_state(self, data: dict) -> None:
@@ -349,3 +381,9 @@ class SettingsPanel(QWidget):
 
         self.txt_user.setText(data.get("opensky_user", ""))
         self.txt_pass.setText(data.get("opensky_pass", ""))
+
+        hidden = set(data.get("hidden_categories", []))
+        for code, cb in self._cat_checks.items():
+            cb.blockSignals(True)
+            cb.setChecked(code in hidden)
+            cb.blockSignals(False)

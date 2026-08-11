@@ -18,6 +18,10 @@ struct DeviceConfig {
     uint32_t cycle_interval_ms;
     char     opensky_user[64];
     char     opensky_pass[64];
+    // Bitmask of ADS-B emitter category codes to drop, set from the Python
+    // app's "Hide Aircraft Categories" toggles. Bit (n-1) = category "Bn",
+    // e.g. bit 0 = B1 (glider). Matches categoryHidden() in opensky.cpp.
+    uint8_t  hidden_category_mask;
     LayoutBlock blocks[MAX_BLOCKS];
     int      block_count;
     bool     valid;          // true once a config has been received / loaded

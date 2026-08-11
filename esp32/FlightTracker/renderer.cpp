@@ -195,18 +195,6 @@ static void fmtRoute(char* out, int sz, const FlightData& f, const char* fmt) {
     else                                snprintf(out, sz, "%s-%s", o, d);
 }
 
-static void fmtAirline(char* out, int sz, const FlightData& f, const char* fmt) {
-    // Use cached airline name if available; fall back to 3-char ICAO prefix
-    if (f.airline_name[0]) {
-        snprintf(out, sz, "%s", f.airline_name);
-        return;
-    }
-    char icao[4] = {0};
-    strncpy(icao, f.callsign, 3);
-    for (int i = 0; icao[i]; i++) if (icao[i] >= 'a') icao[i] -= 32;
-    snprintf(out, sz, "%s", icao[0] ? icao : "---");
-}
-
 static void fmtSquawk(char* out, int sz, const FlightData& f) {
     snprintf(out, sz, "%s", f.squawk[0] ? f.squawk : "----");
 }
@@ -239,10 +227,10 @@ static void blockText(char* out, int sz, const LayoutBlock& blk, const FlightDat
     else if (strcmp(k, "vrate")        == 0) fmtVrate(value,sizeof(value),f.vertical_rate,fmt);
     else if (strcmp(k, "distance")     == 0) fmtDistance(value,sizeof(value),f.distance_km,fmt);
     else if (strcmp(k, "route")        == 0) fmtRoute(value,sizeof(value),f,fmt);
-    else if (strcmp(k, "airline")      == 0) fmtAirline(value,sizeof(value),f,fmt);
     else if (strcmp(k, "squawk")       == 0) fmtSquawk(value,sizeof(value),f);
     else if (strcmp(k, "country")      == 0) fmtCountry(value,sizeof(value),f);
-    // aircraft_type is handled as a special case in renderFlight (bypasses isPlaceholder)
+    // aircraft_type and airline are handled as special cases in renderFlight
+    // (bypass isPlaceholder — airline needs blk.width for "auto" fitting)
 
     if (isPlaceholder(value)) {
         // No valid data — show label only (often empty), no unit
@@ -310,7 +298,18 @@ void renderFlight(const FlightData& flight,
             if (strcmp(blk.fmt, "auto") == 0) {
                 // Longest representation that fits the pixel budget:
                 // full name, then model, then manufacturer, then code.
-                int budget = blk.custom_width > 0 ? blk.custom_width : (TOTAL_WIDTH - blk.x);
+                //
+                // Without an explicit custom_width, the budget must match
+                // Python's LayoutBlock.width fallback (16 "chars" — the
+                // "auto" FormatSpec's declared value_chars) — NOT the rest
+                // of the panel. This block doesn't know where a sibling
+                // block (e.g. squawk) sits to its right, so "rest of
+                // panel" could select text that fits the panel edge but
+                // still overlaps a neighboring block. Only an explicit
+                // drag-resize (custom_width) should ever grant a wider
+                // budget than this nominal default.
+                int budget = blk.custom_width > 0 ? blk.custom_width
+                                                   : fontTextWidth("XXXXXXXXXXXXXXXX", blk.font_scale);
                 char fullUpper[32] = {0};
                 snprintf(fullUpper, sizeof(fullUpper), "%s", full);
                 for (int j = 0; fullUpper[j]; j++) if (fullUpper[j] >= 'a') fullUpper[j] -= 32;
@@ -338,6 +337,63 @@ void renderFlight(const FlightData& flight,
             }
             Serial.printf("[aircraft_type] fmt=%s value='%s'\n", blk.fmt, typeStr);
             fontDrawText(blk.x, blk.y, typeStr, blk.r, blk.g, blk.b, blk.font_scale,
+                         blk.custom_width > 0 ? blk.custom_width : 0);
+            continue;
+        }
+
+        if (strcmp(blk.key, "airline") == 0) {
+            // Port of value_airline()/value_airline_auto() in
+            // src/core/models.py. "full" keeps the AIRLINE_DB name's
+            // natural casing (e.g. "Middle East Airlines"); "short"/"icao"
+            // are uppercased, matching Python exactly.
+            const char* fullName = flight.airline_name[0] ? flight.airline_name : nullptr;
+
+            char icaoCode[4] = {0};
+            strncpy(icaoCode, flight.callsign, 3);
+            for (int j = 0; icaoCode[j]; j++) if (icaoCode[j] >= 'a') icaoCode[j] -= 32;
+
+            char shortName[16] = {0};
+            if (fullName) {
+                const char* sp = strchr(fullName, ' ');
+                int len = sp ? (int)(sp - fullName) : (int)strlen(fullName);
+                if (len > 8) len = 8;
+                snprintf(shortName, sizeof(shortName), "%.*s", len, fullName);
+                for (int j = 0; shortName[j]; j++) if (shortName[j] >= 'a') shortName[j] -= 32;
+            }
+
+            char airlineStr[32] = {0};
+            if (strcmp(blk.fmt, "auto") == 0) {
+                // Bounded default (16 "chars", matching the "auto"
+                // FormatSpec's declared value_chars in models.py) when no
+                // custom_width is set — NOT "rest of panel". Same overlap
+                // hazard as aircraft_type's "auto" and progress: this
+                // block doesn't know where a sibling block sits to its
+                // right.
+                int budget = blk.custom_width > 0 ? blk.custom_width
+                                                   : fontTextWidth("XXXXXXXXXXXXXXXX", blk.font_scale);
+                const char* candidates[3] = { fullName ? fullName : "", shortName, icaoCode };
+                const char* chosen = nullptr;
+                for (int c = 0; c < 3; c++) {
+                    if (!candidates[c][0]) continue;
+                    if (fontTextWidth(candidates[c], blk.font_scale) <= budget) {
+                        chosen = candidates[c];
+                        break;
+                    }
+                }
+                if (!chosen) chosen = icaoCode[0] ? icaoCode : "---";
+                snprintf(airlineStr, sizeof(airlineStr), "%s", chosen);
+            } else if (strcmp(blk.fmt, "short") == 0) {
+                snprintf(airlineStr, sizeof(airlineStr), "%s",
+                         shortName[0] ? shortName : (icaoCode[0] ? icaoCode : "---"));
+            } else if (strcmp(blk.fmt, "icao") == 0) {
+                snprintf(airlineStr, sizeof(airlineStr), "%s", icaoCode[0] ? icaoCode : "---");
+            } else {
+                // "full"
+                snprintf(airlineStr, sizeof(airlineStr), "%s",
+                         fullName ? fullName : (icaoCode[0] ? icaoCode : "---"));
+            }
+            Serial.printf("[airline] fmt=%s value='%s'\n", blk.fmt, airlineStr);
+            fontDrawText(blk.x, blk.y, airlineStr, blk.r, blk.g, blk.b, blk.font_scale,
                          blk.custom_width > 0 ? blk.custom_width : 0);
             continue;
         }
@@ -384,7 +440,13 @@ void renderFlight(const FlightData& flight,
         }
 
         if (strcmp(blk.key, "progress") == 0) {
-            int barW = blk.custom_width > 0 ? blk.custom_width : TOTAL_WIDTH - blk.x;
+            // 40px default (not "rest of panel") — matches Python's
+            // LayoutBlock.width fallback for progress exactly. Same
+            // overlap risk as aircraft_type's "auto" budget above: this
+            // block has no idea where a sibling block sits to its right,
+            // so defaulting to the panel edge could draw the bar straight
+            // through it. Only an explicit drag-resize should widen it.
+            int barW = blk.custom_width > 0 ? blk.custom_width : 40;
             if (barW < 1) continue;
 
             float prog = flightProgress(flight);
@@ -454,9 +516,9 @@ int defaultLayout(LayoutBlock* out, int maxBlocks) {
         const char* label; const char* unit;
     };
     static const Def DEFS[] = {
-        {"airline",       26,  0, true,  "full",       255,255,255, 1.0f, "",   ""},
+        {"airline",       26,  0, true,  "auto",       255,255,255, 1.0f, "",   ""},
         {"route",         26,  8, true,  "iata",       255,255,255, 1.0f, "",   ""},
-        {"aircraft_type", 26, 16, true,  "code",       100,255,100, 1.0f, "",   ""},
+        {"aircraft_type", 26, 16, true,  "auto",       100,255,100, 1.0f, "",   ""},
         {"altitude",       0, 25, true,  "ft_compact", 100,200,255, 1.0f, "A:", "kft"},
         {"speed",         32, 25, true,  "mph",        255,140,  0, 1.0f, "S:", "mph"},
         {"track",          0, 33, true,  "deg",        180,180,255, 1.0f, "T:", ""},

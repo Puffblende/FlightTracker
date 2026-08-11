@@ -255,6 +255,7 @@ class MainWindow(QMainWindow):
         self._settings.credentials_changed.connect(self._on_credentials)
         self._settings.display_size_changed.connect(self._on_display_size_changed)
         self._settings.custom_display_size_changed.connect(self._on_custom_display_changed)
+        self._settings.hidden_categories_changed.connect(self._on_hidden_categories_changed)
 
         # All settings changes mark dirty
         self._settings.radius_changed.connect(lambda _: self._mark_dirty())
@@ -263,6 +264,7 @@ class MainWindow(QMainWindow):
         self._settings.credentials_changed.connect(lambda *_: self._mark_dirty())
         self._settings.display_size_changed.connect(lambda _: self._mark_dirty())
         self._settings.custom_display_size_changed.connect(lambda *_: self._mark_dirty())
+        self._settings.hidden_categories_changed.connect(lambda _: self._mark_dirty())
 
         settings_scroll = QScrollArea()
         settings_scroll.setWidget(self._settings)
@@ -821,6 +823,9 @@ class MainWindow(QMainWindow):
         self._fetch_timer.start()
 
     def _on_flights(self, flights: list[Flight]):
+        hidden = self._settings.hidden_categories
+        if hidden:
+            flights = [f for f in flights if f.category not in hidden]
         self._flights     = flights
         self._current_idx = 0
         self._update_display()
@@ -875,6 +880,9 @@ class MainWindow(QMainWindow):
         self._sb_status.setText(f"Error: {msg}")
 
     def _on_radius_changed(self, val: float):
+        self._fetch_flights_async()
+
+    def _on_hidden_categories_changed(self, _cats):
         self._fetch_flights_async()
 
     def _on_refresh_changed(self, val: int):

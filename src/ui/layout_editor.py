@@ -199,6 +199,12 @@ class BlockItem(QGraphicsRectItem):
             self.setAcceptHoverEvents(True)
         self.setToolTip(f"{block.label}  ({block.width}×{block.height} px)")
 
+        # Pixmap of the actual rendered content
+        pixmap = self._build_pixmap(flight)
+        if not pixmap.isNull():
+            self._pix = QGraphicsPixmapItem(pixmap, self)
+            self._pix.setPos(0, 0)
+
     def _edge_at(self, local_x: float) -> str | None:
         w = self.rect().width()
         if local_x <= EDGE_HANDLE_PX:
@@ -217,12 +223,6 @@ class BlockItem(QGraphicsRectItem):
     def hoverLeaveEvent(self, event):
         self.unsetCursor()
         super().hoverLeaveEvent(event)
-
-        # Pixmap of the actual rendered content
-        pixmap = self._build_pixmap(flight)
-        if not pixmap.isNull():
-            self._pix = QGraphicsPixmapItem(pixmap, self)
-            self._pix.setPos(0, 0)
 
     def _build_pixmap(self, flight: Flight | None) -> QPixmap:
         block = self.block
@@ -529,11 +529,11 @@ class CustomizationPanel(QGroupBox):
             self.unit_edit.setText(block.effective_unit if block.has_unit else "")
 
             is_prog = block.key == "progress"
-            is_auto_actype = block.key == "aircraft_type" and block.fmt == "auto"
-            self._prog_widget.setVisible(is_prog or is_auto_actype)
+            is_auto_fit = block.fmt == "auto" and block.key in ("aircraft_type", "airline")
+            self._prog_widget.setVisible(is_prog or is_auto_fit)
             self.cb_remaining.setVisible(is_prog)
             self.cb_endpoints.setVisible(is_prog)
-            if is_prog or is_auto_actype:
+            if is_prog or is_auto_fit:
                 self.width_spin.setValue(block.custom_width or block.width)
             if is_prog:
                 self.cb_remaining.setChecked(block.show_remaining)

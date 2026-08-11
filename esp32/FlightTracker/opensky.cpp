@@ -3,6 +3,7 @@
 #include "airlines.h"
 #include "icao_country.h"
 #include "http_utils.h"
+#include "ft_webserver.h"  // gConfig.hidden_category_mask
 #include <WiFi.h>
 #include <esp_heap_caps.h>
 #include <WiFiClientSecure.h>
@@ -87,6 +88,15 @@ static void cleanCallsign(char* s) {
 //   - alt_baro in feet → metres; gs in knots → m/s; baro_rate fpm → m/s
 // ---------------------------------------------------------------------------
 
+// True if `cat` (e.g. "B1") is one of the ADS-B emitter categories the user
+// has toggled off in the Python app's "Hide Aircraft Categories" panel.
+// Single-field read of gConfig — no mutex needed (see the policy comment on
+// gConfigMutex in ft_webserver.h: only multi-field reads need it).
+static bool categoryHidden(const char* cat) {
+    if (!cat || cat[0] != 'B' || cat[1] < '1' || cat[1] > '5') return false;
+    return (gConfig.hidden_category_mask & (1 << (cat[1] - '1'))) != 0;
+}
+
 static bool parseAcArray(const String& body, float lat, float lon,
                          FlightData* flights, int maxFlights, int* count) {
     StaticJsonDocument<512> filter;
@@ -125,6 +135,7 @@ static bool parseAcArray(const String& body, float lat, float lon,
         // Python adsb_lol.py: skip surface vehicles (ADS-B category C*)
         const char* cat = a["category"] | "";
         if (cat[0] == 'C' || cat[0] == 'c') continue;
+        if (categoryHidden(cat)) continue;
 
         float fLat = jfloat(a["lat"]);
         float fLon = jfloat(a["lon"]);
@@ -417,6 +428,7 @@ static bool fetchAdsbFi(const char* path, float lat, float lon,
 
         const char* cat = ac["category"] | "";
         if (cat[0] == 'C' || cat[0] == 'c') continue;
+        if (categoryHidden(cat)) continue;
 
         float fLat = jfloat(ac["lat"]);
         float fLon = jfloat(ac["lon"]);

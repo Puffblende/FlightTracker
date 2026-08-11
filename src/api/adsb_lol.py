@@ -117,6 +117,7 @@ def fetch_flights(location: Location, radius_km: float,
             airline_iata=airline_iata,
             airline_icao=airline_icao,
             aircraft_type=ac.get("t") or "",
+            category=category,
         )
         flights.append(f)
 

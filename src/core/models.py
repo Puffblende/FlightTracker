@@ -58,6 +58,7 @@ class Flight:
     destination: str = ""      # IATA code, e.g. "LAX"
     origin_icao: str = ""      # ICAO code, e.g. "KORD"
     destination_icao: str = "" # ICAO code, e.g. "KLAX"
+    category: str = ""         # ADS-B emitter category, e.g. "B1" (glider). "" = unknown.
 
     @property
     def display_callsign(self) -> str:
@@ -96,6 +97,7 @@ BLOCK_FORMATS: dict[str, list[FormatSpec]] = {
         FormatSpec("sq40", "40 × 40 px  (full-height)",  0, "", ""),
     ],
     "airline": [
+        FormatSpec("auto",  "MIDDLE EAST AIRLINES → MIDDLE EAST → RYR  (best fit)", 16, "", ""),
         FormatSpec("full",  "RYANAIR  (full name)",  8, "", ""),
         FormatSpec("short", "RYAN  (first word)",    4, "", ""),
         FormatSpec("icao",  "RYR  (ICAO code)",      3, "", ""),
@@ -162,10 +164,10 @@ BLOCK_FORMATS: dict[str, list[FormatSpec]] = {
 
 BLOCK_DEFAULT_FORMAT: dict = {
     "logo":          "sq24",
-    "airline":       "full",
+    "airline":       "auto",
     "callsign":      "full",
     "route":         "iata",
-    "aircraft_type": "code",
+    "aircraft_type": "auto",
     "altitude":      "ft_compact",
     "speed":         "mph",
     "track":         "deg",
@@ -316,9 +318,9 @@ class LayoutBlock:
 def default_layout():
     return [
         LayoutBlock("logo",          0,  0,  True,  "sq24"),
-        LayoutBlock("airline",      26,  0,  True,  "full"),
+        LayoutBlock("airline",      26,  0,  True,  "auto"),
         LayoutBlock("route",        26,  8,  True,  "iata"),
-        LayoutBlock("aircraft_type",26, 16,  True,  "code"),
+        LayoutBlock("aircraft_type",26, 16,  True,  "auto"),
         LayoutBlock("altitude",      0, 25,  True,  "ft_compact"),
         LayoutBlock("speed",        32, 25,  True,  "mph"),
         LayoutBlock("track",         0, 33,  True,  "deg"),
@@ -427,6 +429,27 @@ def value_airline(flight, fmt_id: str) -> str:
     return name or "---"
 
 
+def value_airline_auto(flight, block: "LayoutBlock") -> str:
+    """Pick the longest airline representation that actually fits the
+    block's pixel width — full name, then first word, then the 3-letter
+    ICAO code — instead of hard-clipping a long name mid-word. Same idea
+    as value_aircraft_type_auto()."""
+    char_w = max(1, round(CHAR_W * block.font_scale))
+    spacing = max(0, round(CHAR_SPACING * block.font_scale))
+
+    def px(n_chars: int) -> int:
+        return n_chars * (char_w + spacing) - spacing if n_chars > 0 else 0
+
+    reserved = px(len(block.effective_label)) + px(len(block.effective_unit))
+    budget = max(0, block.width - reserved)
+
+    for fmt_id in ("full", "short", "icao"):
+        v = value_airline(flight, fmt_id)
+        if v and not _is_placeholder(v) and px(len(v)) <= budget:
+            return v
+    return value_airline(flight, "icao")
+
+
 def value_callsign(flight, fmt_id: str) -> str:
     if fmt_id == "icao24":
         return flight.icao24.upper()
@@ -509,7 +532,8 @@ def render_block_text(block: LayoutBlock, flight: Flight) -> str:
     elif key == "vrate":       v = value_vrate(flight.vertical_rate, fmt)
     elif key == "distance":    v = value_distance(flight.distance_km, fmt)
     elif key == "route":       v = value_route(flight, fmt)
-    elif key == "airline":     v = value_airline(flight, fmt)
+    elif key == "airline":
+        v = value_airline_auto(flight, block) if fmt == "auto" else value_airline(flight, fmt)
     elif key == "callsign":    v = value_callsign(flight, fmt)
     elif key == "aircraft_type":
         v = value_aircraft_type_auto(flight, block) if fmt == "auto" else value_aircraft_type(flight, fmt)

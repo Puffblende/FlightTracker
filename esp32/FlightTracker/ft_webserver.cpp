@@ -226,6 +226,18 @@ static void applyConfigDoc(JsonDocument& doc) {
     strncpy(gConfig.opensky_user, u, sizeof(gConfig.opensky_user) - 1);
     strncpy(gConfig.opensky_pass, p, sizeof(gConfig.opensky_pass) - 1);
 
+    // Hidden category codes, e.g. ["B1","B3"] — see hidden_category_mask
+    // comment in ft_webserver.h and categoryHidden() in opensky.cpp.
+    gConfig.hidden_category_mask = 0;
+    JsonArray hiddenCats = doc["hidden_categories"];
+    if (!hiddenCats.isNull()) {
+        for (JsonVariant v : hiddenCats) {
+            const char* code = v.as<const char*>();
+            if (code && code[0] == 'B' && code[1] >= '1' && code[1] <= '5' && code[2] == '\0')
+                gConfig.hidden_category_mask |= (1 << (code[1] - '1'));
+        }
+    }
+
     JsonArray layout = doc["layout"];
     gConfig.block_count = 0;
     if (!layout.isNull()) {
